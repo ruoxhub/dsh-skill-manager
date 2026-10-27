@@ -76,6 +76,7 @@
     "README.md",
     "README.en.md",
     "README.i18n.yaml",
+    "docs/images",
     "icon.svg",
     "LICENSE"
   ],

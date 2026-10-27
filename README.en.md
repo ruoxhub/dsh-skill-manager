@@ -17,6 +17,26 @@
 
 A visual Skill Explorer for DeepSeek Harness (DSH) Web GUI and desktop client: browse loaded skills tiered by source origin, toggle model invocation permissions, install from SkillHub Plaza and Suites Ecosystem, manage presets and batch operations, author and edit skills in place, and safely delete through a recoverable trash mechanism.
 
+## Screenshots
+
+### Skills list
+
+<img src="docs/images/skills-tab.png" alt="Skill Center skills list grouped by source with search, source filter and batch management" width="100%">
+
+Skills grouped by source, with a search box, source filter and batch management entry at the top.
+
+### SkillHub Plaza
+
+<img src="docs/images/skillhub-plaza.png" alt="SkillHub Plaza with category pills, four sorting modes and quick install buttons" width="100%">
+
+Category pills, score/downloads/latest/stars sorting, and a quick install button on each card.
+
+### Suites Ecosystem
+
+<img src="docs/images/suites-add-marketplace.png" alt="Suites Ecosystem add-marketplace dialog accepting a GitHub repo, Git URL, ZIP archive or local directory" width="100%">
+
+A marketplace source can be a GitHub repository, a Git URL, a ZIP archive or a local directory.
+
 ## What it does
 
 - **Sidebar row** "Skill Center" (in the shell's panel list, beside Plugins, Schedule and the task board) opens a native center-column page with a tab bar. The row opens the panel, and opening any session or new chat returns the center column to the conversation, matching the shell's own Plugins and Schedule pages; the page carries no back control of its own.
