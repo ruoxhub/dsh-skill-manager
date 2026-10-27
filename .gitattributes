@@ -1,0 +1,8 @@
+# Keep every text file LF in the repository and in the working tree, so the
+# build and the committed README i18n blob hashes are machine-independent.
+* text=auto eol=lf
+
+# Binary assets: never text-normalize.
+*.png binary
+*.jpg binary
+*.ico binary

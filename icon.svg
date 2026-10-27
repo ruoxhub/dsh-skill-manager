@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="skill center">
+  <rect width="64" height="64" rx="14" fill="#141a24"/>
+  <g fill="none" stroke="#6ee7f9" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M31 25.2c-3.9-3.1-8.9-3.6-13-2.7v20.3c4.1-.9 9.1-.4 13 2.7z"/>
+    <path d="M33 25.2c3.9-3.1 8.9-3.6 13-2.7v20.3c-4.1-.9-9.1-.4-13 2.7z"/>
+    <path d="M32 25.2v20.3"/>
+  </g>
+  <path d="M47.5 8.5l2.7 6.3 6.3 2.7-6.3 2.7-2.7 6.3-2.7-6.3-6.3-2.7 6.3-2.7z" fill="#f6c453"/>
+</svg>
