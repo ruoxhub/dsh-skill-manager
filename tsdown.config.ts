@@ -9,7 +9,7 @@
  */
 import { clientBundle } from './shared/tsdown.client.ts'
 
-export default clientBundle('@ruoxhub/dsh-skill-manager', ['src/index.ts'], {
+export default clientBundle('@moruoxing/dsh-skill-manager', ['src/index.ts'], {
   libExternal: [
     '@deepseek-ai/dsh-client-locale',
     '@deepseek-ai/dsh-client-ui-slots',

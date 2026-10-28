@@ -1,5 +1,5 @@
 {
-  "name": "@ruoxhub/dsh-skill-manager",
+  "name": "@moruoxing/dsh-skill-manager",
   "description": "DSH skill center: browse loaded skills by source (bundled / project / user / custom / runtime), enable or disable, create and delete, in a web GUI panel.",
   "version": "0.1.0",
   "icon": "icon.svg",
@@ -83,7 +83,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ruoxhub/dsh-skill-manager.git"
+    "url": "git+https://github.com/ruoxhub/dsh-skill-manager.git"
   },
   "homepage": "https://github.com/ruoxhub/dsh-skill-manager#readme",
   "bugs": {

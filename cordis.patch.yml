@@ -4,4 +4,4 @@
 # `dsh plugin --profile web add link:<repo>/packages/dsh-skill-explorer`.
 - insert:
     - id: ui-skill-explorer
-      name: '@ruoxhub/dsh-skill-manager'
+      name: '@moruoxing/dsh-skill-manager'

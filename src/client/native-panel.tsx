@@ -13,7 +13,7 @@
  * ui-layout / ui-sidebar therefore does not matter, and neither does a shell
  * that cannot serve the seats (the callback simply never runs).
  *
- * @module @ruoxhub/dsh-skill-manager/client
+ * @module @moruoxing/dsh-skill-manager/client
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'

@@ -3,7 +3,7 @@
 [中文](README.md) | English
 
 <p align="center">
-  <img src="https://img.shields.io/npm/v/@ruoxhub/dsh-skill-manager?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/npm/v/@moruoxing/dsh-skill-manager?style=flat-square" alt="Version">
   &nbsp;
   <img src="https://img.shields.io/badge/DSH-%3E%3D0.2.1--rc.2-4c6ef5?style=flat-square&amp;labelColor=454a54" alt="DSH">
   &nbsp;
@@ -61,7 +61,7 @@ A marketplace source can be a GitHub repository, a Git URL, a ZIP archive or a l
 ### From npm (recommended)
 
 ```sh
-dsh plugin --profile web add @ruoxhub/dsh-skill-manager@latest
+dsh plugin --profile web add @moruoxing/dsh-skill-manager@latest
 ```
 
 ### From the repository (development)

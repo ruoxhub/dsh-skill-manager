@@ -50,7 +50,7 @@ export type { SkillApi } from './api.ts'
 export function apply(ctx: ClientContext): void {
   // Anonymous install heartbeat (docs/telemetry.md): one beat per browser per
   // UTC day, package name only, silent failure.
-  reportDailyHeartbeat([{ name: '@ruoxhub/dsh-skill-manager' }])
+  reportDailyHeartbeat([{ name: '@moruoxing/dsh-skill-manager' }])
 
   ctx.effect(() => {
     try {
