@@ -56,7 +56,7 @@ describe('MarketTab component', () => {
     // Subtabs
     expect(container.textContent).not.toContain('推荐')
     expect(container.textContent).toContain('SkillHub')
-    expect(container.textContent).toContain('套件')
+    expect(container.textContent).toContain('从 Git 安装')
 
     // Sort buttons
     expect(container.textContent).toContain('综合')
@@ -190,5 +190,34 @@ describe('MarketTab component', () => {
     expect(fakeApi.searchMarket).toHaveBeenCalledWith(
       expect.objectContaining({ category: 'pay-skill', page: 1 }),
     )
+  })
+
+  it('switches to Git install subtab when clicked', async () => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+
+    const fakeApi = {
+      searchMarket: vi.fn().mockResolvedValue(sampleSearchResult),
+      previewGitInstall: vi.fn(),
+      confirmGitInstall: vi.fn(),
+      cancelGitPreview: vi.fn(),
+    } as any
+
+    await act(async () => {
+      root.render(<MarketTab api={fakeApi} />)
+    })
+
+    const gitSubtabBtn = Array.from(container.querySelectorAll('button')).find(
+      b => b.textContent?.trim() === '从 Git 安装',
+    )
+    expect(gitSubtabBtn).toBeDefined()
+
+    await act(async () => {
+      gitSubtabBtn!.click()
+    })
+
+    expect(container.textContent).toContain('从 Git 仓库安装')
+    expect(container.textContent).toContain('克隆并预览')
   })
 })

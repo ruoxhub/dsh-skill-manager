@@ -15,6 +15,7 @@
 import { existsSync } from 'node:fs'
 import { mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve, sep } from 'node:path'
+import { getCentralSkillsDir } from './central-store.ts'
 import { parseFrontmatter } from './frontmatter.ts'
 // Type-only: the store owns the identity type, so importing it cannot pull
 // the persistence module (which imports isSkillName back from here) into a cycle.
@@ -33,6 +34,7 @@ export const SOURCE_GROUPS: SourceGroup[] = [
   { key: 'project-dsh', title: 'Project skills (.dsh/skills)', hint: 'Located in the project directory, scoped to its workspace' },
   { key: 'project-agents', title: 'Project skills (.agents/skills)', hint: 'Located in the project directory, scoped to its workspace' },
   { key: 'custom', title: 'Custom directories', hint: 'customSkillDirs config' },
+  { key: 'central-store', title: 'Central skills (~/.agents/skills-manager/skills)', hint: 'Managed by skills-manager central store' },
   { key: 'user-dsh', title: 'User skills (~/.dsh/skills)', hint: 'Global skills shared by all projects on this machine' },
   { key: 'user-agents', title: 'User skills (~/.agents/skills)', hint: 'Global skills shared by all projects on this machine' },
   { key: 'runtime', title: 'Runtime registered', hint: 'Skills registered at runtime by plugins' },
@@ -66,6 +68,17 @@ export function isSkillName(name: string): boolean {
  * runtime rank. A duplicate name resolves by this rank across every source the
  * panel shows, so the entry it displays is the one the model receives. Note
  * runtime (250) sits between the project roots and the custom root, not last.
+ *
+ * `central-store` ranks BELOW the user roots and the custom root on purpose.
+ * The central store is this plugin's own library, not a root the harness loads
+ * from (see presets.ts): a skill there reaches the model only after it is
+ * deployed into an agent root, and that deployment is a copy, so the store and
+ * the agent root hold the same skill under one name. Ranking the library above
+ * the agent root made every deployed skill resolve to its library copy, which
+ * moved it out of the group for the directory the model actually reads and left
+ * "User skills" showing only the handful of deployed skills the library never
+ * managed. The deployed copy is the loaded one, so it is the one to display;
+ * the library's update status is still attached by name afterwards.
  */
 export const SKILL_SOURCE_RANK: ReadonlyMap<string, number> = new Map([
   ['project-dsh', 100],
@@ -74,6 +87,7 @@ export const SKILL_SOURCE_RANK: ReadonlyMap<string, number> = new Map([
   ['custom', 300],
   ['user-dsh', 400],
   ['user-agents', 500],
+  ['central-store', 550],
   ['bundled', 600],
 ])
 
@@ -123,6 +137,26 @@ export interface SkillEntry {
   workspaceName?: string
   /** True when the skill belongs to the primary active session workspace. */
   isActiveWorkspace?: boolean
+  /** Central store skill ID if tracked */
+  centralSkillId?: string
+  /** Update status from CentralSkillStore */
+  updateStatus?: 'up_to_date' | 'update_available' | 'error' | 'unknown'
+  /** Source type if tracked (e.g. 'git', 'skillssh', 'local') */
+  sourceType?: string
+  /** Source repo url if tracked, exactly as the user typed it */
+  sourceRef?: string
+  /** Normalized clone URL of that repo (identity of the imported repository) */
+  sourceRefResolved?: string
+  /** Epoch ms the central-store row was created (the skill's install time) */
+  installedAt?: number
+  /** Current revision SHA */
+  sourceRevision?: string
+  /** Remote revision SHA if checked */
+  remoteRevision?: string
+  /** Last checked timestamp */
+  lastCheckedAt?: number | null
+  /** Last check error message */
+  lastCheckError?: string | null
 }
 
 /** Registry snapshot entry shape (subset of ctx.skills entries). */
@@ -157,6 +191,8 @@ export interface CollectOptions {
   dshHome: string
   /** User agents config root (~/.agents). */
   agentsHome: string
+  /** Central skills directory (~/.agents/skills-manager/skills). */
+  centralSkillsDir?: string
   /** ctx.skills registry (snapshot). */
   registry: { snapshot(options: { cwd: string }): Promise<{ skills: RegistrySkill[]; complete: boolean }> }
   /**
@@ -197,6 +233,8 @@ export interface ListPayload {
   complete: boolean
   groups: GroupPayload[]
   workspaces?: WorkspaceItem[]
+  updateAvailableCount?: number
+  lastCheckedAt?: number | null
 }
 
 /** Find the nearest ancestor directory containing .git (cwd itself when none). */
@@ -563,6 +601,15 @@ export async function collectSkills(options: CollectOptions): Promise<CollectRes
   const roots = new Set<string>(options.projectRoots !== undefined && options.projectRoots.length > 0 ? [activeProjectRoot, ...options.projectRoots] : [activeProjectRoot])
   // Each root scans independently, in parallel (Map writes are atomic under the single thread).
   const scanTasks: Array<Promise<void>> = []
+  // The user's home is often registered as a workspace, and joining it with the
+  // project conventions lands exactly on the two global roots below
+  // (`<home>/.agents/skills`, `<home>/.dsh/skills`). Scanning that as a project
+  // root would list every global skill twice and, because a project source
+  // outranks a user one, label the global skills as belonging to a "project"
+  // named after the home directory — leaving the user-level groups empty and
+  // the panel's "User skills" filter with nothing to match.
+  const globalRoots = new Set([resolve(join(dshHome, 'skills')), resolve(join(agentsHome, 'skills'))])
+  const isGlobalRoot = (dir: string): boolean => globalRoots.has(resolve(dir))
   for (const root of roots) {
     const isActive = root === activeProjectRoot || root === cwd
     const wsInfo = {
@@ -570,10 +617,20 @@ export async function collectSkills(options: CollectOptions): Promise<CollectRes
       name: basename(root) || root,
       active: isActive,
     }
-    scanTasks.push(scanSkillRoot(join(root, '.dsh', 'skills'), 'project-dsh', byName, wsInfo))
-    scanTasks.push(scanSkillRoot(join(root, '.agents', 'skills'), 'project-agents', byName, wsInfo))
+    const projectDsh = join(root, '.dsh', 'skills')
+    if (!isGlobalRoot(projectDsh)) scanTasks.push(scanSkillRoot(projectDsh, 'project-dsh', byName, wsInfo))
+    const projectAgents = join(root, '.agents', 'skills')
+    if (!isGlobalRoot(projectAgents)) scanTasks.push(scanSkillRoot(projectAgents, 'project-agents', byName, wsInfo))
   }
   for (const dir of normalizeSkillRoots(customSkillDirs ?? [])) scanTasks.push(scanSkillRoot(dir, 'custom', byName))
+  const centralDir = options.centralSkillsDir ?? (
+    (options.dshHome !== undefined || options.agentsHome !== undefined)
+      ? undefined
+      : getCentralSkillsDir()
+  )
+  if (centralDir && existsSync(centralDir)) {
+    scanTasks.push(scanSkillRoot(centralDir, 'central-store', byName))
+  }
   scanTasks.push(scanSkillRoot(join(dshHome, 'skills'), 'user-dsh', byName, undefined, true))
   scanTasks.push(scanSkillRoot(join(agentsHome, 'skills'), 'user-agents', byName))
   await Promise.all(scanTasks)
@@ -661,21 +718,109 @@ export async function overwriteSkillFile(path: string, name: string, description
   return path
 }
 
-/** Move a skill file into its .trash sibling directory (recoverable delete). */
-export async function trashSkillFile(path: string): Promise<string> {
-  const trashDir = join(dirname(path), '.trash')
+/**
+ * Move one path into the `.trash` sibling of its parent directory (recoverable
+ * delete).
+ *
+ * The caller passes the whole skill directory for a `<name>/SKILL.md` skill and
+ * the file itself for a single-file `<name>.md` skill, so nothing the skill
+ * shipped (scripts, references) is left behind in the live root. The trashed
+ * entry keeps the skill's own name, and a same-instant second delete gets a
+ * `-2` suffix instead of overwriting the first.
+ */
+export async function trashPath(target: string): Promise<string> {
+  const trashDir = join(dirname(target), '.trash')
   await mkdir(trashDir, { recursive: true })
-  const trashTarget = join(trashDir, `${Date.now()}-SKILL.md`)
-  await rename(path, trashTarget)
-  return trashTarget
+  const stem = `${new Date().toISOString().replace(/[:.]/gu, '-')}-${basename(target)}`
+  let trashed = join(trashDir, stem)
+  for (let copy = 2; existsSync(trashed); copy++) trashed = join(trashDir, `${stem}-${copy}`)
+  await rename(target, trashed)
+  return trashed
 }
 
-/** User skill root convention. */
-export function userSkillRoot(dshHome: string): string {
-  return join(dshHome, 'skills')
+/** The path a delete moves: the skill's own directory, or a lone `<name>.md` file. */
+export function skillOwnPath(path: string): string {
+  return basename(path).toLowerCase() === 'skill.md' ? dirname(path) : path
+}
+
+/** User skill root convention (~/.agents/skills). */
+export function userSkillRoot(agentsHome: string): string {
+  return join(agentsHome, 'skills')
 }
 
 /** Project skill root convention (project root + .dsh/skills). */
 export function projectSkillRoot(projectRoot: string): string {
   return `${projectRoot}${sep}.dsh${sep}skills`
+}
+
+/** One entry parked in a skill root's `.trash`. */
+export interface TrashEntry {
+  /** Absolute path of the trashed directory or file. */
+  path: string
+  /** The skill's own name, recovered from the entry name. */
+  name: string
+  /** When the delete happened, from the entry name. */
+  deletedAt: number
+  /** True when the entry is a whole skill directory (restorable as one skill). */
+  isDirectory: boolean
+}
+
+/**
+ * Read one skill root's `.trash` directory.
+ *
+ * Delete parks the skill's own directory (or lone `.md` file) here under a
+ * timestamped name, so the entry name is the only record of what it was and
+ * when. A name that does not parse is still listed — it is a real directory in
+ * the trash, and hiding it would make the trash look empty while it is not.
+ * @param rootDir - the skill root whose `.trash` to read.
+ * @returns the entries, newest first.
+ */
+export async function listTrash(rootDir: string): Promise<TrashEntry[]> {
+  const trashDir = join(rootDir, '.trash')
+  let names: string[]
+  try {
+    names = await readdir(trashDir)
+  } catch {
+    return []
+  }
+  const entries: TrashEntry[] = []
+  for (const entryName of names) {
+    if (entryName.startsWith('.')) continue
+    const path = join(trashDir, entryName)
+    let isDirectory = false
+    try {
+      isDirectory = (await stat(path)).isDirectory()
+    } catch {
+      continue
+    }
+    // `<ISO with : . replaced by ->-<basename>`, with an optional `-2` suffix
+    // when two deletes landed in the same instant.
+    const match = /^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z-(.+?)(?:-(\d+))?$/u.exec(entryName)
+    const deletedAt = match === null
+      ? 0
+      : Date.parse(`${match[1]}T${match[2]}:${match[3]}:${match[4]}.${match[5]}Z`)
+    const name = match === null ? entryName : (match[6] ?? entryName)
+    entries.push({ path, name, deletedAt: Number.isNaN(deletedAt) ? 0 : deletedAt, isDirectory })
+  }
+  return entries.sort((left, right) => right.deletedAt - left.deletedAt)
+}
+
+/**
+ * Move a trashed entry back into its skill root.
+ *
+ * The restore refuses to overwrite: a skill re-created under the same name after
+ * the delete is the live one now, and clobbering it would make a restore
+ * destroy work. The caller reports the conflict instead.
+ * @param entry - the trash entry to restore.
+ * @param rootDir - the skill root to restore into.
+ * @returns the restored absolute path.
+ * @throws when the destination already exists.
+ */
+export async function restoreTrashEntry(entry: TrashEntry, rootDir: string): Promise<string> {
+  const destination = join(rootDir, entry.name)
+  if (existsSync(destination)) {
+    throw new Error(`${entry.name} already exists in ${rootDir}; remove or rename it first`)
+  }
+  await rename(entry.path, destination)
+  return destination
 }

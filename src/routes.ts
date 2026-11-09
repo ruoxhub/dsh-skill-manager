@@ -3,7 +3,8 @@
  * (one skill's editable fields and body), set enabled (rewrites SKILL.md
  * frontmatter), set provider enabled (records a panel-local switch for a
  * plugin-provided skill, which has no writable path), create, update (rewrites
- * an existing SKILL.md in place), delete (move to .trash), import (batch-create
+ * an existing SKILL.md in place), delete (move the skill's folder, its central
+ * row and its deployed copies to .trash), import (batch-create
  * skills from a directory or a .zip archive) and health. Every route carries
  * the shared trust fence (loopback by default; a live
  * paired-device cookie is an extra allow
@@ -17,26 +18,48 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { basename, isAbsolute, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { isSkillExplorerAllowed } from './access.ts'
-import { buildPayload, collectSkills, findProjectRoot, isSkillName, overwriteSkillFile, projectSkillRoot, trashSkillFile, userSkillRoot, writeSkillFile, type CollectOptions, type SkillEntry } from './collect.ts'
+import { CentralSkillStore, getCentralDbPath, getCentralSkillsDir } from './central-store.ts'
+import { buildPayload, collectSkills, findProjectRoot, isSkillName, listTrash, overwriteSkillFile, projectSkillRoot, restoreTrashEntry, skillOwnPath, trashPath, userSkillRoot, writeSkillFile, type CollectOptions, type SkillEntry } from './collect.ts'
 import { parseFrontmatter, setFrontmatterField, stripFrontmatter } from './frontmatter.ts'
 import { readJsonBody, writeJson } from './http.ts'
 import { IMPORT_LIMITS, ImportRequestError, importSkills, type ImportSource } from './import.ts'
 import { providerSkillIdentity, readProviderToggles, setProviderSkillEnabled, type ProviderSkillIdentity } from './provider-toggles.ts'
+import { checkAllSkills, checkOneSkill } from './remote-resolver.ts'
 import { fetchSkillDetail, searchSkills } from './skillhub/client.ts'
-import { installMarketSkill } from './skillhub/installer.ts'
+import { marketIdentities } from './skillhub/installed.ts'
+import { AuditLog } from './audit.ts'
+import { TagStore } from './tags.ts'
 import {
-  addMarketplace,
-  getMarketplaceDetail,
-  getSuitePluginDetail,
-  installSuitePlugin,
-  listMarketplaces,
-  refreshMarketplace,
-  removeMarketplace,
-} from './suites/manager.ts'
+  backupCommit,
+  backupStatus,
+  initBackupRepo,
+  isGitRepo,
+  listSnapshots,
+  restoreSnapshot,
+  setBackupRemote,
+} from './backup.ts'
+import {
+  applyPreset,
+  PresetStore,
+  ROOT_KEYS,
+  rootDir,
+  type DeployMode,
+  type LibraryCopy,
+  type PresetWithSkills,
+  type RootKey,
+} from './presets.ts'
+import { installMarketSkill } from './skillhub/installer.ts'
+import { updateAllSkills, updateOneSkill } from './skill-updater.ts'
+import {
+  cancelGitPreview,
+  confirmGitInstall,
+  GitInstallInputError,
+  previewGitInstall,
+} from './git-installer.ts'
 
 /** Route paths (client bundle mirrors these literals; tests assert both sides). */
 export const ROUTES = {
@@ -52,13 +75,30 @@ export const ROUTES = {
   marketSearch: '/api/dsh-skill-explorer/market/search',
   marketDetail: '/api/dsh-skill-explorer/market/detail',
   marketInstall: '/api/dsh-skill-explorer/market/install',
-  suitesMarketplaces: '/api/dsh-skill-explorer/suites/marketplaces',
-  suitesAddMarketplace: '/api/dsh-skill-explorer/suites/marketplaces/add',
-  suitesRemoveMarketplace: '/api/dsh-skill-explorer/suites/marketplaces/remove',
-  suitesRefreshMarketplace: '/api/dsh-skill-explorer/suites/marketplaces/refresh',
-  suitesPlugins: '/api/dsh-skill-explorer/suites/plugins',
-  suitesPluginDetail: '/api/dsh-skill-explorer/suites/plugin-detail',
-  suitesInstall: '/api/dsh-skill-explorer/suites/install',
+  gitPreview: '/api/dsh-skill-explorer/git/preview',
+  gitConfirm: '/api/dsh-skill-explorer/git/confirm',
+  gitCancel: '/api/dsh-skill-explorer/git/cancel',
+  checkAll: '/api/dsh-skill-explorer/check-all',
+  checkOne: '/api/dsh-skill-explorer/check-one',
+  updateAll: '/api/dsh-skill-explorer/update-all',
+  updateOne: '/api/dsh-skill-explorer/update-one',
+  presetList: '/api/dsh-skill-explorer/presets',
+  presetSave: '/api/dsh-skill-explorer/presets/save',
+  presetDelete: '/api/dsh-skill-explorer/presets/delete',
+  presetApply: '/api/dsh-skill-explorer/presets/apply',
+  backupStatus: '/api/dsh-skill-explorer/backup/status',
+  backupInit: '/api/dsh-skill-explorer/backup/init',
+  backupCommit: '/api/dsh-skill-explorer/backup/commit',
+  backupSnapshots: '/api/dsh-skill-explorer/backup/snapshots',
+  backupRestore: '/api/dsh-skill-explorer/backup/restore',
+  backupRemote: '/api/dsh-skill-explorer/backup/remote',
+  tagList: '/api/dsh-skill-explorer/tags',
+  tagSet: '/api/dsh-skill-explorer/tags/set',
+  tagRename: '/api/dsh-skill-explorer/tags/rename',
+  tagDelete: '/api/dsh-skill-explorer/tags/delete',
+  trashList: '/api/dsh-skill-explorer/trash',
+  trashRestore: '/api/dsh-skill-explorer/trash/restore',
+  auditList: '/api/dsh-skill-explorer/audit',
 } as const
 
 /** Largest import request body: the archive cap plus base64 expansion and JSON. */
@@ -79,6 +119,12 @@ export interface SkillRoutesDeps {
   dshHome: string
   /** User agents config root (~/.agents). */
   agentsHome: string
+  /** Central skills-manager database path override (~/.agents/skills-manager/skills-manager.db). */
+  centralDbPath?: string
+  /** Central skills-manager skills directory override (~/.agents/skills-manager/skills). */
+  centralSkillsDir?: string
+  /** Central store instance override (for tests/injection). */
+  centralStore?: CentralSkillStore
   /**
    * Extra custom skill roots. A resolver rather than a fixed list because the
    * host reads them off the live `skill-filesystem` loader rows, which a
@@ -91,8 +137,32 @@ export interface SkillRoutesDeps {
   activeSessionCwds(): string[]
   /** Optional registered workspaces from DSH workspaceRegistry. */
   registeredWorkspaces?(): Array<{ root: string; name: string }>
+  /** Preset store override (tests inject an in-memory one). */
+  presetStore?: PresetStore
+  /** Tag store override (tests inject an in-memory one). */
+  tagStore?: TagStore
+  /** Audit log override (tests inject an in-memory one). */
+  auditLog?: AuditLog
   /** Logger. */
   logger: { warn(error: unknown): void }
+}
+
+/**
+ * Whether two paths name the same location.
+ *
+ * The panel and the store spell the same folder differently only in case (a
+ * `C:\\Users` scan against a `c:\\users` row), so compare case-insensitively on
+ * Windows and exactly elsewhere.
+ * @param left - first path.
+ * @param right - second path.
+ * @returns whether they resolve to the same location.
+ */
+function samePath(left: string, right: string): boolean {
+  const normalize = (path: string): string => {
+    const resolved = resolve(path)
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+  }
+  return normalize(left) === normalize(right)
 }
 
 /** Default process cwd fallback (overridable in tests). */
@@ -182,16 +252,29 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
     }
   }
 
-  /** All known workspaces (registered workspaces preferred, merged with active session roots). */
+  /**
+   * All known workspaces.
+   *
+   * The DSH workspace registry is the authority whenever it answers: deleting
+   * a workspace removes only its registration and keeps the folder and every
+   * session log, so a retained session's cwd (now under "Ungrouped") is not
+   * evidence of a workspace. Merging it back resurrected deleted workspaces as
+   * phantom filter entries with no workspace behind them.
+   *
+   * Session cwds stay the fallback for a composition without a registry (a
+   * headless host, an older harness), where they are the only evidence there
+   * is. The panel's own cwd is unaffected either way: buildPayload always adds
+   * the active project root, so the session the user is in is still listed.
+   */
   const allKnownWorkspaces = (): Array<{ root: string; name: string }> => {
-    const list: Array<{ root: string; name: string }> = []
+    const registered: Array<{ root: string; name: string }> = []
     try {
       if (typeof deps.registeredWorkspaces === 'function') {
         const fromReg = deps.registeredWorkspaces()
         if (Array.isArray(fromReg)) {
           for (const item of fromReg) {
-            if (typeof item?.root === 'string' && item.root !== '' && !list.some((ws) => ws.root === item.root)) {
-              list.push(item)
+            if (typeof item?.root === 'string' && item.root !== '' && !registered.some((ws) => ws.root === item.root)) {
+              registered.push(item)
             }
           }
         }
@@ -199,6 +282,9 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
     } catch {
       // Degrade gracefully
     }
+    if (registered.length > 0) return registered
+
+    const list: Array<{ root: string; name: string }> = []
     for (const sessionCwd of safeSessionCwds()) {
       const root = findProjectRoot(sessionCwd)
       if (!list.some((item) => item.root === root)) {
@@ -228,6 +314,7 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
     customSkillDirs: resolveCustomSkillDirs(),
     dshHome,
     agentsHome,
+    centralSkillsDir: deps.centralSkillsDir,
     registry,
     providerDisabledSkills: (await readProviderToggles(dshHome)).disabled,
   })
@@ -271,6 +358,49 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
       && (candidate.provider ?? '') === identity.provider)
   }
 
+  /**
+   * Remove what a central-store skill owns beyond its scanned folder: the
+   * `skills-manager.db` row, the central copy, and every deployed target.
+   *
+   * The record is only touched when the deleted folder really is one of its
+   * copies: a same-name skill from a stronger source (a project skill shadowing
+   * a central one) must not take the central skill's row down with it. Each copy
+   * is moved into its own `.trash` rather than unlinked, so a mistaken delete of
+   * a managed skill stays recoverable.
+   * @param name - the deleted skill's name.
+   * @param deletedPath - the folder/file the delete already moved aside.
+   * @returns the deployed copies moved aside, for the response body.
+   */
+  const removeCentralSkill = async (name: string, deletedPath: string): Promise<{ targets: string[] }> => {
+    const store = deps.centralStore ?? new CentralSkillStore(deps.centralDbPath)
+    try {
+      const record = store.getSkillByName(name)
+      if (record === undefined) return { targets: [] }
+      const copies = [record.central_path, ...store.getSkillTargets(record.id).map((target) => target.target_path)]
+      if (!copies.some((copy) => samePath(copy, deletedPath))) return { targets: [] }
+      const targets: string[] = []
+      for (const target of store.getSkillTargets(record.id)) {
+        if (!existsSync(target.target_path)) continue
+        try {
+          targets.push(await trashPath(target.target_path))
+        } catch (error) {
+          logger.warn(error)
+        }
+      }
+      if (existsSync(record.central_path)) {
+        try {
+          await trashPath(record.central_path)
+        } catch (error) {
+          logger.warn(error)
+        }
+      }
+      store.deleteSkill(record.id)
+      return { targets }
+    } finally {
+      if (deps.centralStore === undefined) store.close()
+    }
+  }
+
   /** Resolve the exact file the panel showed, rejecting stale same-name fallbacks. */
   const resolveScannedSkill = async (
     name: string,
@@ -290,6 +420,143 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
     return skill as SkillEntry & { path: string }
   }
 
+  /**
+   * The skill roots this plugin may deploy into, each with the `skill_targets`
+   * tool key it records.
+   *
+   * These are the only writable destinations: a request naming a root outside
+   * this list is an attempt to write outside the skill roots, not a preference.
+   * @param cwd - explicit request cwd, if any.
+   * @param fallbackCwd - the panel's resolved cwd.
+   * @returns the allowed roots, user root first.
+   */
+  const allowedDeployRoots = (
+    cwd: unknown,
+    fallbackCwd: string,
+  ): Array<{ key: 'user' | 'project'; root: string }> => {
+    const projectBase = typeof cwd === 'string' && cwd.trim() !== '' ? cwd.trim() : fallbackCwd
+    return [
+      { key: 'user', root: userSkillRoot(agentsHome) },
+      { key: 'project', root: projectSkillRoot(findProjectRoot(projectBase)) },
+    ]
+  }
+
+  /** The preset store, opened once per route family (tests inject their own). */
+  const presetStore = (): PresetStore => {
+    if (deps.presetStore !== undefined) return deps.presetStore
+    return new PresetStore(deps.centralDbPath ?? getCentralDbPath())
+  }
+
+  /** The tag store, opened per request unless injected. */
+  const withTagStore = <T>(use: (store: TagStore) => T): T => {
+    if (deps.tagStore !== undefined) return use(deps.tagStore)
+    const store = new TagStore(deps.centralDbPath ?? getCentralDbPath())
+    try {
+      return use(store)
+    } finally {
+      store.close()
+    }
+  }
+
+  /** The audit log, opened per request unless injected. */
+  const withAuditLog = <T>(use: (log: AuditLog) => T): T => {
+    if (deps.auditLog !== undefined) return use(deps.auditLog)
+    const log = new AuditLog(deps.centralDbPath ?? getCentralDbPath())
+    try {
+      return use(log)
+    } finally {
+      log.close()
+    }
+  }
+
+  /**
+   * The skill roots whose `.trash` the panel can browse.
+   *
+   * Deletes park a skill in the `.trash` of the root it lived in, so the trash
+   * view has to ask the same questions the list does: every project root plus
+   * the two user roots.
+   */
+  const trashRoots = (cwd: string): Array<{ root: string; label: string }> => {
+    const roots: Array<{ root: string; label: string }> = []
+    for (const projectRoot of new Set([findProjectRoot(cwd), ...allProjectRoots()])) {
+      roots.push({ root: join(projectRoot, '.dsh', 'skills'), label: `${basename(projectRoot)}/.dsh/skills` })
+      roots.push({ root: join(projectRoot, '.agents', 'skills'), label: `${basename(projectRoot)}/.agents/skills` })
+    }
+    roots.push({ root: userSkillRoot(agentsHome), label: 'user/.agents/skills' })
+    roots.push({ root: join(dshHome, 'skills'), label: 'user/.dsh/skills' })
+    return roots
+  }
+
+  /** The four harness roots this plugin may deploy a preset into. */
+  const presetRoots = (cwd: string): Record<RootKey, string> => {
+    const layout = { dshHome, agentsHome, projectRoot: findProjectRoot(cwd) }
+    return Object.fromEntries(ROOT_KEYS.map((key) => [key, rootDir(key, layout)])) as Record<RootKey, string>
+  }
+
+  /** The library copy of every skill the central store tracks, by name. */
+  const libraryCopies = (): Map<string, LibraryCopy> => {
+    const store = deps.centralStore ?? new CentralSkillStore(deps.centralDbPath)
+    try {
+      const copies = new Map<string, LibraryCopy>()
+      for (const record of store.getAllSkills()) {
+        if (typeof record.central_path !== 'string' || record.central_path === '') continue
+        copies.set(record.name, { name: record.name, dir: record.central_path })
+      }
+      return copies
+    } finally {
+      if (deps.centralStore === undefined) store.close()
+    }
+  }
+
+  /**
+   * Read the requested roots, rejecting anything that is not a harness root.
+   * Selecting a root is a preference; naming an arbitrary path is not.
+   */
+  const parseRoots = (value: unknown): RootKey[] | string => {
+    if (!Array.isArray(value) || value.length === 0) return [...ROOT_KEYS]
+    const roots: RootKey[] = []
+    for (const entry of value) {
+      if (typeof entry !== 'string' || !(ROOT_KEYS as readonly string[]).includes(entry)) {
+        return `roots must be a subset of: ${ROOT_KEYS.join(', ')}`
+      }
+      if (!roots.includes(entry as RootKey)) roots.push(entry as RootKey)
+    }
+    return roots
+  }
+
+  const parseMode = (value: unknown): DeployMode => (value === 'copy' ? 'copy' : 'symlink')
+
+  /**
+   * The preset a request names, or a 404 response already written.
+   */
+  const resolvePreset = (store: PresetStore, id: unknown, res: ServerResponse): PresetWithSkills | undefined => {
+    if (typeof id !== 'string' || id.trim() === '') {
+      writeJson(res, 400, { error: 'expected { id }' })
+      return undefined
+    }
+    const preset = store.getPreset(id.trim())
+    if (preset === undefined) {
+      writeJson(res, 404, { error: `preset ${id} not found` })
+      return undefined
+    }
+    return preset
+  }
+
+  /** Slugs matching what is already installed (see skillhub/installed.ts). */
+  const installedMarketIdentities = async (cwd: string): Promise<Set<string>> => {
+    const { skills } = await collectSkills(await collectOptions(cwd))
+    return marketIdentities(skills)
+  }
+
+  /**
+   * The directory backups cover: the central library the panel manages.
+   *
+   * Presets, tags, and deployment records live in the database beside it, so a
+   * repository over this directory captures the skills themselves — the part a
+   * user cannot recreate.
+   */
+  const backupRoot = (): string => deps.centralSkillsDir ?? getCentralSkillsDir()
+
   const routes: WebRoute[] = [
     {
       kind: 'exact',
@@ -304,7 +571,37 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
           const cwd = panelCwd(queryParam(url, 'cwd'))
           const projectRoots = allProjectRoots()
           const { skills, complete } = await collectSkills(await collectOptions(cwd))
-          writeJson(res, 200, buildPayload(skills, complete, cwd, [...new Set(projectRoots)]))
+          const payload = buildPayload(skills, complete, cwd, [...new Set(projectRoots)])
+
+          // Attach central store status and update availability
+          const centralStore = new CentralSkillStore(deps.centralDbPath)
+          if (centralStore.isOpen()) {
+            try {
+              const statusMap = centralStore.getNameToStatusMap()
+              for (const group of payload.groups) {
+                for (const skill of group.skills) {
+                  const info = statusMap.get(skill.name)
+                  if (info) {
+                    skill.centralSkillId = info.id
+                    skill.updateStatus = info.updateStatus
+                    skill.sourceType = info.sourceType
+                    skill.sourceRef = info.sourceRef ?? undefined
+                    skill.sourceRefResolved = info.sourceRefResolved ?? undefined
+                    skill.installedAt = info.createdAt ?? undefined
+                    skill.sourceRevision = info.sourceRevision ?? undefined
+                    skill.remoteRevision = info.remoteRevision ?? undefined
+                    skill.lastCheckedAt = info.lastCheckedAt ?? undefined
+                    skill.lastCheckError = info.lastCheckError ?? undefined
+                  }
+                }
+              }
+              payload.updateAvailableCount = centralStore.getAvailableUpdateCount()
+            } finally {
+              centralStore.close()
+            }
+          }
+
+          writeJson(res, 200, payload)
         } catch (error) {
           logger.warn(error)
           writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
@@ -464,7 +761,7 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
           const payload = body as Record<string, unknown>
           const { root, name, description, whenToUse, content, cwd } = payload
           if (root !== 'user' && root !== 'project') {
-            writeJson(res, 400, { error: 'root must be user (~/.dsh/skills) or project (project .dsh/skills)' })
+            writeJson(res, 400, { error: 'root must be user (~/.agents/skills) or project (project .dsh/skills)' })
             return
           }
           if (typeof cwd !== 'string' || cwd.trim() === '') {
@@ -488,9 +785,10 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
             return
           }
           const baseDir = root === 'user'
-            ? userSkillRoot(dshHome)
+            ? userSkillRoot(agentsHome)
             : projectSkillRoot(findProjectRoot(cwd))
           const target = await writeSkillFile(baseDir, name, description, typeof whenToUse === 'string' ? whenToUse : undefined, content)
+          withAuditLog((log) => log.record({ action: 'create', skillName: name, detail: target }))
           writeJson(res, 200, { ok: true, name, path: target })
         } catch (error) {
           if (error instanceof Error && /already exists/.test(error.message)) {
@@ -516,7 +814,7 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
           const payload = body as Record<string, unknown>
           const { root, cwd, source } = payload
           if (root !== 'user' && root !== 'project') {
-            writeJson(res, 400, { error: 'root must be user (~/.dsh/skills) or project (project .dsh/skills)' })
+            writeJson(res, 400, { error: 'root must be user (~/.agents/skills) or project (project .dsh/skills)' })
             return
           }
           if (typeof cwd !== 'string' || cwd.trim() === '') {
@@ -533,8 +831,8 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
           // a different base workspace would rank a project skill against the
           // wrong root and import a file that is immediately shadowed.
           const workspace = panelCwd(cwd)
-          const targetLevel = root === 'user' ? 'user-dsh' : 'project-dsh'
-          const baseDir = root === 'user' ? userSkillRoot(dshHome) : projectSkillRoot(findProjectRoot(cwd))
+          const targetLevel = root === 'user' ? 'user-agents' : 'project-dsh'
+          const baseDir = root === 'user' ? userSkillRoot(agentsHome) : projectSkillRoot(findProjectRoot(cwd))
           const { skills } = await collectSkills(await collectOptions(workspace))
           const report = await importSkills({ baseDir, targetLevel, source: resolved, existing: skills })
           writeJson(res, 200, { ok: true, ...report })
@@ -624,8 +922,16 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
             writeJson(res, 400, { error: `skill ${name} is a linked skill and cannot be deleted` })
             return
           }
-          const moved = await trashSkillFile(skill.path)
-          writeJson(res, 200, { ok: true, name, moved })
+          // Move the skill's whole directory (or lone .md file), not just its
+          // SKILL.md: scripts and references the skill shipped would otherwise
+          // stay behind in the live root.
+          const moved = await trashPath(skillOwnPath(skill.path))
+          // A central-store skill also owns a database row and deployed copies;
+          // the panel lists it from those, so deleting the folder alone would
+          // leave it listed with updates on offer for a skill that is gone.
+          const removedCentral = await removeCentralSkill(name, skillOwnPath(skill.path))
+          withAuditLog((log) => log.record({ action: 'delete', skillName: name, detail: moved }))
+          writeJson(res, 200, { ok: true, name, moved, removedCentral })
         } catch (error) {
           logger.warn(error)
           writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
@@ -659,8 +965,7 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
           const page = Number(queryParam(url, 'page')) || 1
           const pageSize = Number(queryParam(url, 'pageSize')) || 20
           const cwd = panelCwd(queryParam(url, 'cwd'))
-          const { skills } = await collectSkills(await collectOptions(cwd))
-          const installed = new Set(skills.map(s => s.name))
+          const installed = await installedMarketIdentities(cwd)
 
           const result = await searchSkills(q, {
             category,
@@ -689,8 +994,7 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
             return
           }
           const cwd = panelCwd(queryParam(url, 'cwd'))
-          const { skills } = await collectSkills(await collectOptions(cwd))
-          const installed = new Set(skills.map(s => s.name))
+          const installed = await installedMarketIdentities(cwd)
 
           const detail = await fetchSkillDetail(slug, { installed })
           writeJson(res, 200, detail)
@@ -717,22 +1021,60 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
             writeJson(res, 400, { error: 'slug is required' })
             return
           }
+          const allowedRoots = allowedDeployRoots(cwd, panelCwd())
           let destinationRoot: string
           if (typeof targetRoot === 'string' && targetRoot.trim() !== '') {
-            destinationRoot = targetRoot.trim()
+            // The requested root is an identity claim, not a target: only the
+            // roots this plugin itself deploys into are writable. Accepting an
+            // arbitrary absolute path here would let a caller write a skill
+            // anywhere the host process can reach.
+            const requested = resolve(targetRoot.trim())
+            const match = allowedRoots.find((candidate) => resolve(candidate.root) === requested)
+            if (match === undefined) {
+              writeJson(res, 400, { error: `targetRoot must be one of: ${allowedRoots.map((candidate) => candidate.root).join(', ')}` })
+              return
+            }
+            destinationRoot = match.root
           } else if (root === 'project' || (typeof cwd === 'string' && cwd.trim() !== '')) {
-            const projectRoot = typeof cwd === 'string' && cwd.trim() !== ''
-              ? findProjectRoot(cwd.trim())
-              : findProjectRoot(panelCwd())
-            destinationRoot = projectSkillRoot(projectRoot)
+            const project = allowedRoots.find((candidate) => candidate.key === 'project')
+            destinationRoot = project?.root ?? projectSkillRoot(findProjectRoot(panelCwd()))
           } else {
-            destinationRoot = userSkillRoot(dshHome)
+            destinationRoot = userSkillRoot(agentsHome)
           }
 
           const result = await installMarketSkill(slug, {
             targetRoot: destinationRoot,
             version: typeof version === 'string' ? version : undefined,
           })
+
+          // Register the install so it is tracked like every other central
+          // skill: without a row it would show no update status and could not
+          // be removed with its own bookkeeping.
+          const store = deps.centralStore ?? new CentralSkillStore(deps.centralDbPath)
+          try {
+            if (store.isOpen()) {
+              const record = store.upsertSkill({
+                name: result.name,
+                sourceType: 'skillhub',
+                sourceRef: `skillhub:${result.slug}`,
+                centralPath: result.path,
+                contentHash: result.contentHash,
+                updateStatus: 'up_to_date',
+              })
+              if (record?.id) {
+                store.upsertSkillTarget({
+                  skillId: record.id,
+                  tool: destinationRoot === userSkillRoot(agentsHome) ? 'agents' : 'project',
+                  targetPath: result.path,
+                  sourceHash: result.contentHash,
+                })
+              }
+            }
+          } finally {
+            if (deps.centralStore === undefined) store.close()
+          }
+
+          withAuditLog((log) => log.record({ action: 'install-market', skillName: result.name, detail: `${result.slug} -> ${result.path}` }))
           writeJson(res, 200, { ok: true, ...result })
         } catch (error) {
           logger.warn(error)
@@ -742,45 +1084,7 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
     },
     {
       kind: 'exact',
-      path: ROUTES.suitesMarketplaces,
-      handler: async (req: IncomingMessage, res: ServerResponse) => {
-        if (!guard(req, res, 'GET')) return
-        try {
-          const marketplaces = listMarketplaces(agentsHome)
-          writeJson(res, 200, { ok: true, marketplaces })
-        } catch (error) {
-          logger.warn(error)
-          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
-        }
-      },
-    },
-    {
-      kind: 'exact',
-      path: ROUTES.suitesAddMarketplace,
-      handler: async (req: IncomingMessage, res: ServerResponse) => {
-        if (!guard(req, res, 'POST')) return
-        try {
-          const body = await readJsonBody(req, { maxBytes: 64 * 1024, objectOnly: true })
-          if (body === null) {
-            writeJson(res, 400, { error: 'invalid JSON body' })
-            return
-          }
-          const { source, name } = body as { source?: string; name?: string }
-          if (typeof source !== 'string' || source.trim() === '') {
-            writeJson(res, 400, { error: 'source is required' })
-            return
-          }
-          const added = await addMarketplace(agentsHome, source.trim(), typeof name === 'string' ? name.trim() : undefined)
-          writeJson(res, 200, { ok: true, marketplace: added })
-        } catch (error) {
-          logger.warn(error)
-          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
-        }
-      },
-    },
-    {
-      kind: 'exact',
-      path: ROUTES.suitesRemoveMarketplace,
+      path: ROUTES.gitPreview,
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         if (!guard(req, res, 'POST')) return
         try {
@@ -789,12 +1093,87 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
             writeJson(res, 400, { error: 'invalid JSON body' })
             return
           }
-          const { name } = body as { name?: string }
-          if (typeof name !== 'string' || name.trim() === '') {
-            writeJson(res, 400, { error: 'name is required' })
+          const { repoUrl } = body as { repoUrl?: string }
+          if (typeof repoUrl !== 'string' || repoUrl.trim() === '') {
+            writeJson(res, 400, { error: 'repoUrl is required' })
             return
           }
-          removeMarketplace(agentsHome, name.trim())
+          const preview = await previewGitInstall(repoUrl.trim())
+          writeJson(res, 200, { ok: true, ...preview })
+        } catch (error) {
+          logger.warn(error)
+          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.gitConfirm,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'POST')) return
+        try {
+          const body = await readJsonBody(req, { maxBytes: 64 * 1024, objectOnly: true })
+          if (body === null) {
+            writeJson(res, 400, { error: 'invalid JSON body' })
+            return
+          }
+          const { repoUrl, tempDir, items, target, cwd } = body as {
+            repoUrl?: string
+            tempDir?: string
+            items?: Array<{ relPath: string; name: string }>
+            target?: 'user' | 'project'
+            cwd?: string
+          }
+          if (typeof repoUrl !== 'string' || repoUrl.trim() === '') {
+            writeJson(res, 400, { error: 'repoUrl is required' })
+            return
+          }
+          if (typeof tempDir !== 'string' || tempDir.trim() === '') {
+            writeJson(res, 400, { error: 'tempDir is required' })
+            return
+          }
+          if (!Array.isArray(items) || items.length === 0) {
+            writeJson(res, 400, { error: 'items must be a non-empty array' })
+            return
+          }
+          const result = await confirmGitInstall({
+            repoUrl: repoUrl.trim(),
+            tempDir: tempDir.trim(),
+            items,
+            target,
+            cwd: panelCwd(cwd),
+            agentsHome,
+            dshHome,
+            centralDbPath: deps.centralDbPath,
+            centralSkillsDir: deps.centralSkillsDir,
+          })
+          for (const item of result.installed) {
+            withAuditLog((log) => log.record({ action: 'install-git', skillName: item.name, detail: item.centralPath }))
+          }
+          writeJson(res, 200, result)
+        } catch (error) {
+          logger.warn(error)
+          // A missing/forged preview sandbox is a client error, not a server fault.
+          const status = error instanceof GitInstallInputError ? 400 : 500
+          writeJson(res, status, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.gitCancel,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'POST')) return
+        try {
+          const body = await readJsonBody(req, { maxBytes: 16 * 1024, objectOnly: true })
+          if (body === null) {
+            writeJson(res, 400, { error: 'invalid JSON body' })
+            return
+          }
+          const { tempDir } = body as { tempDir?: string }
+          if (typeof tempDir === 'string' && tempDir.trim() !== '') {
+            await cancelGitPreview(tempDir.trim())
+          }
           writeJson(res, 200, { ok: true })
         } catch (error) {
           logger.warn(error)
@@ -804,22 +1183,144 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
     },
     {
       kind: 'exact',
-      path: ROUTES.suitesRefreshMarketplace,
+      path: ROUTES.checkAll,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'POST')) return
+        const store = deps.centralStore ?? new CentralSkillStore(deps.centralDbPath)
+        try {
+          const summary = await checkAllSkills(store)
+          writeJson(res, 200, { ok: true, summary })
+        } catch (error) {
+          logger.warn(error)
+          writeJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+        } finally {
+          if (!deps.centralStore) store.close()
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.checkOne,
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         if (!guard(req, res, 'POST')) return
         try {
-          const body = await readJsonBody(req, { maxBytes: 16 * 1024, objectOnly: true })
+          const body = (await readJsonBody(req, { maxBytes: 16 * 1024, objectOnly: true })) as { id?: string; name?: string } | null
+          const idOrName = typeof body?.id === 'string' ? body.id : typeof body?.name === 'string' ? body.name : undefined
+          if (!idOrName) {
+            writeJson(res, 400, { ok: false, error: 'expected { id } or { name }' })
+            return
+          }
+          const store = deps.centralStore ?? new CentralSkillStore(deps.centralDbPath)
+          try {
+            const skill = store.getSkillById(idOrName) ?? store.getSkillByName(idOrName)
+            if (!skill) {
+              writeJson(res, 404, { ok: false, error: `Skill "${idOrName}" not found in central store` })
+              return
+            }
+            const result = await checkOneSkill(skill, store)
+            writeJson(res, 200, { ok: true, result })
+          } finally {
+            if (!deps.centralStore) store.close()
+          }
+        } catch (error) {
+          logger.warn(error)
+          writeJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.updateAll,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'POST')) return
+        const store = deps.centralStore ?? new CentralSkillStore(deps.centralDbPath)
+        try {
+          const summary = await updateAllSkills(store)
+          for (const entry of summary.results) {
+            withAuditLog((log) => log.record({
+              action: 'update',
+              skillName: entry.name,
+              success: entry.success,
+              detail: entry.success ? `${entry.previousRevision ?? '?'} -> ${entry.newRevision ?? '?'}` : entry.error ?? null,
+            }))
+          }
+          writeJson(res, 200, { ok: true, summary })
+        } catch (error) {
+          logger.warn(error)
+          writeJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+        } finally {
+          if (!deps.centralStore) store.close()
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.presetList,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'GET')) return
+        try {
+          const store = presetStore()
+          const owned = deps.presetStore !== undefined
+          try {
+            writeJson(res, 200, {
+              ok: true,
+              presets: store.listPresets(),
+              activeId: store.activePresetId(),
+              deployments: store.listDeployments(),
+              roots: ROOT_KEYS,
+            })
+          } finally {
+            if (!owned) store.close()
+          }
+        } catch (error) {
+          logger.warn(error)
+          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.presetSave,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'POST')) return
+        try {
+          const body = await readJsonBody(req, { maxBytes: 256 * 1024, objectOnly: true })
           if (body === null) {
             writeJson(res, 400, { error: 'invalid JSON body' })
             return
           }
-          const { name } = body as { name?: string }
+          const payload = body as Record<string, unknown>
+          const { id, name, skillNames } = payload
           if (typeof name !== 'string' || name.trim() === '') {
-            writeJson(res, 400, { error: 'name is required' })
+            writeJson(res, 400, { error: 'expected { name, skillNames }' })
             return
           }
-          const refreshed = await refreshMarketplace(agentsHome, name.trim())
-          writeJson(res, 200, { ok: true, marketplace: refreshed })
+          const members = Array.isArray(skillNames)
+            ? skillNames.filter((entry): entry is string => typeof entry === 'string' && entry !== '')
+            : []
+          const store = presetStore()
+          const owned = deps.presetStore !== undefined
+          try {
+            if (typeof id === 'string' && id.trim() !== '') {
+              const existing = store.getPreset(id.trim())
+              if (existing === undefined) {
+                writeJson(res, 404, { error: `preset ${id} not found` })
+                return
+              }
+              store.renamePreset(existing.id, name)
+              store.setMembers(existing.id, members)
+              writeJson(res, 200, { ok: true, preset: store.getPreset(existing.id) })
+              return
+            }
+            const created = store.createPreset(name, members)
+            if (created === undefined) {
+              writeJson(res, 409, { error: `preset "${name}" already exists` })
+              return
+            }
+            writeJson(res, 200, { ok: true, preset: created })
+          } finally {
+            if (!owned) store.close()
+          }
         } catch (error) {
           logger.warn(error)
           writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
@@ -828,64 +1329,7 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
     },
     {
       kind: 'exact',
-      path: ROUTES.suitesPlugins,
-      handler: async (req: IncomingMessage, res: ServerResponse) => {
-        if (!guard(req, res, 'GET')) return
-        try {
-          const url = new URL(req.url ?? '/', 'http://x')
-          const marketplace = queryParam(url, 'marketplace')
-          if (!marketplace || marketplace.trim() === '') {
-            writeJson(res, 400, { error: 'marketplace parameter is required' })
-            return
-          }
-          const query = queryParam(url, 'q') ?? queryParam(url, 'query')
-          const root = queryParam(url, 'root') as 'user' | 'project' | undefined
-          const cwd = panelCwd(queryParam(url, 'cwd'))
-
-          const detail = getMarketplaceDetail(agentsHome, marketplace.trim(), {
-            query,
-            targetRoot: root,
-            workspacePath: cwd,
-          })
-          writeJson(res, 200, { ok: true, ...detail })
-        } catch (error) {
-          logger.warn(error)
-          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
-        }
-      },
-    },
-    {
-      kind: 'exact',
-      path: ROUTES.suitesPluginDetail,
-      handler: async (req: IncomingMessage, res: ServerResponse) => {
-        if (!guard(req, res, 'GET')) return
-        try {
-          const url = new URL(req.url ?? '/', 'http://x')
-          const marketplace = queryParam(url, 'marketplace')
-          const plugin = queryParam(url, 'plugin')
-          if (!marketplace || marketplace.trim() === '') {
-            writeJson(res, 400, { error: 'marketplace parameter is required' })
-            return
-          }
-          if (!plugin || plugin.trim() === '') {
-            writeJson(res, 400, { error: 'plugin parameter is required' })
-            return
-          }
-          const detail = getSuitePluginDetail({
-            marketplaceName: marketplace.trim(),
-            pluginName: plugin.trim(),
-            agentsHome,
-          })
-          writeJson(res, 200, { ok: true, ...detail })
-        } catch (error) {
-          logger.warn(error)
-          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
-        }
-      },
-    },
-    {
-      kind: 'exact',
-      path: ROUTES.suitesInstall,
+      path: ROUTES.presetDelete,
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         if (!guard(req, res, 'POST')) return
         try {
@@ -894,32 +1338,412 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
             writeJson(res, 400, { error: 'invalid JSON body' })
             return
           }
-          const { marketplace, plugin, root, cwd } = body as {
-            marketplace?: string
-            plugin?: string
-            root?: 'user' | 'project'
-            cwd?: string
+          const { id } = body as Record<string, unknown>
+          const store = presetStore()
+          const owned = deps.presetStore !== undefined
+          try {
+            if (resolvePreset(store, id, res) === undefined) return
+            store.deletePreset(String(id).trim())
+            writeJson(res, 200, { ok: true })
+          } finally {
+            if (!owned) store.close()
           }
-          if (typeof marketplace !== 'string' || marketplace.trim() === '') {
-            writeJson(res, 400, { error: 'marketplace is required' })
-            return
-          }
-          if (typeof plugin !== 'string' || plugin.trim() === '') {
-            writeJson(res, 400, { error: 'plugin is required' })
-            return
-          }
-          const workspace = panelCwd(cwd)
-          const result = installSuitePlugin({
-            agentsHome,
-            marketplaceName: marketplace.trim(),
-            pluginName: plugin.trim(),
-            targetRoot: root,
-            workspacePath: workspace,
-          })
-          writeJson(res, 200, result)
         } catch (error) {
           logger.warn(error)
           writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.presetApply,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'POST')) return
+        try {
+          const body = await readJsonBody(req, { maxBytes: 256 * 1024, objectOnly: true })
+          if (body === null) {
+            writeJson(res, 400, { error: 'invalid JSON body' })
+            return
+          }
+          const payload = body as Record<string, unknown>
+          const roots = parseRoots(payload.roots)
+          if (typeof roots === 'string') {
+            writeJson(res, 400, { error: roots })
+            return
+          }
+          const cwd = panelCwd(typeof payload.cwd === 'string' ? payload.cwd : undefined)
+          const store = presetStore()
+          const owned = deps.presetStore !== undefined
+          try {
+            const preset = resolvePreset(store, payload.id, res)
+            if (preset === undefined) return
+            const result = applyPreset(
+              store,
+              preset,
+              libraryCopies(),
+              { dirs: presetRoots(cwd), selected: roots, mode: parseMode(payload.mode) },
+              { force: payload.force === true },
+            )
+            writeJson(res, 200, { ok: true, ...result })
+          } finally {
+            if (!owned) store.close()
+          }
+        } catch (error) {
+          logger.warn(error)
+          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.backupStatus,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'GET')) return
+        try {
+          writeJson(res, 200, { ok: true, ...(await backupStatus(backupRoot())) })
+        } catch (error) {
+          logger.warn(error)
+          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.backupInit,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'POST')) return
+        try {
+          await initBackupRepo(backupRoot())
+          writeJson(res, 200, { ok: true, ...(await backupStatus(backupRoot())) })
+        } catch (error) {
+          logger.warn(error)
+          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.backupCommit,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'POST')) return
+        try {
+          const body = await readJsonBody(req, { maxBytes: 64 * 1024, objectOnly: true })
+          if (body === null) {
+            writeJson(res, 400, { error: 'invalid JSON body' })
+            return
+          }
+          const payload = body as Record<string, unknown>
+          const message = typeof payload.message === 'string' && payload.message.trim() !== ''
+            ? payload.message.trim().slice(0, 200)
+            : 'backup'
+          if (!isGitRepo(backupRoot())) await initBackupRepo(backupRoot())
+          const result = await backupCommit(backupRoot(), message, {
+            snapshot: payload.snapshot !== false,
+            remote: payload.remote === true,
+          })
+          writeJson(res, result.error === undefined ? 200 : 502, { ok: result.error === undefined, ...result, status: await backupStatus(backupRoot()) })
+        } catch (error) {
+          logger.warn(error)
+          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.backupSnapshots,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'GET')) return
+        try {
+          writeJson(res, 200, { ok: true, snapshots: await listSnapshots(backupRoot()) })
+        } catch (error) {
+          logger.warn(error)
+          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.backupRestore,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'POST')) return
+        try {
+          const body = await readJsonBody(req, { maxBytes: 64 * 1024, objectOnly: true })
+          if (body === null) {
+            writeJson(res, 400, { error: 'invalid JSON body' })
+            return
+          }
+          const { tag } = body as Record<string, unknown>
+          if (typeof tag !== 'string' || tag.trim() === '') {
+            writeJson(res, 400, { error: 'expected { tag }' })
+            return
+          }
+          const result = await restoreSnapshot(backupRoot(), tag.trim())
+          withAuditLog((log) => log.record({ action: 'backup-restore', detail: `${tag} (safety ${result.safetyCommit.slice(0, 7)})` }))
+          writeJson(res, 200, { ok: true, ...result })
+        } catch (error) {
+          logger.warn(error)
+          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.backupRemote,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'POST')) return
+        try {
+          const body = await readJsonBody(req, { maxBytes: 64 * 1024, objectOnly: true })
+          if (body === null) {
+            writeJson(res, 400, { error: 'invalid JSON body' })
+            return
+          }
+          const { url } = body as Record<string, unknown>
+          if (typeof url !== 'string') {
+            writeJson(res, 400, { error: 'expected { url }' })
+            return
+          }
+          if (!isGitRepo(backupRoot())) await initBackupRepo(backupRoot())
+          try {
+            await setBackupRemote(backupRoot(), url)
+          } catch (error) {
+            // A rejected URL is a client error, not a server fault.
+            writeJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+            return
+          }
+          writeJson(res, 200, { ok: true, ...(await backupStatus(backupRoot())) })
+        } catch (error) {
+          logger.warn(error)
+          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.tagList,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'GET')) return
+        try {
+          const tags = withTagStore((store) => ({
+            tags: store.listTags(),
+            bySkill: Object.fromEntries(store.allTags()),
+          }))
+          writeJson(res, 200, { ok: true, ...tags })
+        } catch (error) {
+          logger.warn(error)
+          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.tagSet,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'POST')) return
+        try {
+          const body = await readJsonBody(req, { maxBytes: 64 * 1024, objectOnly: true })
+          if (body === null) {
+            writeJson(res, 400, { error: 'invalid JSON body' })
+            return
+          }
+          const { name, tags } = body as Record<string, unknown>
+          if (typeof name !== 'string' || !isSkillName(name)) {
+            writeJson(res, 400, { error: 'expected { name: <kebab-case>, tags: string[] }' })
+            return
+          }
+          if (!Array.isArray(tags)) {
+            writeJson(res, 400, { error: 'tags must be an array of strings' })
+            return
+          }
+          // The tag names a skill the panel is showing, so a fresh scan has to
+          // resolve it: a tag on a skill that is not there would be invisible
+          // and unremovable through the UI.
+          const { skills } = await collectSkills(await collectOptions(panelCwd()))
+          const known = skills.some((skill) => skill.name === name)
+          if (!known) {
+            writeJson(res, 404, { error: `skill ${name} is not in the library` })
+            return
+          }
+          const stored = withTagStore((store) => store.setTags(name, tags.filter((tag): tag is string => typeof tag === 'string')))
+          withAuditLog((log) => log.record({ action: 'toggle', skillName: name, detail: `tags: ${stored.join(', ')}` }))
+          writeJson(res, 200, { ok: true, name, tags: stored })
+        } catch (error) {
+          logger.warn(error)
+          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.tagRename,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'POST')) return
+        try {
+          const body = await readJsonBody(req, { maxBytes: 64 * 1024, objectOnly: true })
+          if (body === null) {
+            writeJson(res, 400, { error: 'invalid JSON body' })
+            return
+          }
+          const { from, to } = body as Record<string, unknown>
+          if (typeof from !== 'string' || typeof to !== 'string') {
+            writeJson(res, 400, { error: 'expected { from, to }' })
+            return
+          }
+          const renamed = withTagStore((store) => store.renameTag(from, to))
+          if (!renamed) {
+            writeJson(res, 400, { error: 'rename needs two different, non-empty tags' })
+            return
+          }
+          writeJson(res, 200, { ok: true, tags: withTagStore((store) => store.listTags()) })
+        } catch (error) {
+          logger.warn(error)
+          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.tagDelete,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'POST')) return
+        try {
+          const body = await readJsonBody(req, { maxBytes: 64 * 1024, objectOnly: true })
+          if (body === null) {
+            writeJson(res, 400, { error: 'invalid JSON body' })
+            return
+          }
+          const { tag } = body as Record<string, unknown>
+          if (typeof tag !== 'string' || tag.trim() === '') {
+            writeJson(res, 400, { error: 'expected { tag }' })
+            return
+          }
+          withTagStore((store) => store.deleteTag(tag))
+          writeJson(res, 200, { ok: true, tags: withTagStore((store) => store.listTags()) })
+        } catch (error) {
+          logger.warn(error)
+          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.trashList,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'GET')) return
+        try {
+          const url = new URL(req.url ?? '/', 'http://x')
+          const cwd = panelCwd(queryParam(url, 'cwd'))
+          const roots = trashRoots(cwd)
+          const entries: Array<{ root: string; label: string; path: string; name: string; deletedAt: number; isDirectory: boolean }> = []
+          for (const item of roots) {
+            for (const entry of await listTrash(item.root)) entries.push({ root: item.root, label: item.label, ...entry })
+          }
+          entries.sort((left, right) => right.deletedAt - left.deletedAt)
+          writeJson(res, 200, { ok: true, entries })
+        } catch (error) {
+          logger.warn(error)
+          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.trashRestore,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'POST')) return
+        try {
+          const body = await readJsonBody(req, { maxBytes: 64 * 1024, objectOnly: true })
+          if (body === null) {
+            writeJson(res, 400, { error: 'invalid JSON body' })
+            return
+          }
+          const { path } = body as Record<string, unknown>
+          if (typeof path !== 'string' || path.trim() === '') {
+            writeJson(res, 400, { error: 'expected { path }' })
+            return
+          }
+          // The path is a trash entry, so it must sit in a `.trash` directory
+          // the panel itself reads. Anything else is not a restore target.
+          const requested = resolve(path.trim())
+          const url = new URL(req.url ?? '/', 'http://x')
+          const roots = trashRoots(panelCwd(queryParam(url, 'cwd')))
+          const owner = roots.find((item) => resolve(item.root, '.trash') === dirname(requested))
+          if (owner === undefined) {
+            writeJson(res, 400, { error: 'path is not inside a skill root trash' })
+            return
+          }
+          const entries = await listTrash(owner.root)
+          const entry = entries.find((candidate) => resolve(candidate.path) === requested)
+          if (entry === undefined) {
+            writeJson(res, 404, { error: 'trash entry not found' })
+            return
+          }
+          let restored: string
+          try {
+            restored = await restoreTrashEntry(entry, owner.root)
+          } catch (error) {
+            // A name that is live again is a conflict the user resolves, not a
+            // server fault.
+            writeJson(res, 409, { error: error instanceof Error ? error.message : String(error) })
+            return
+          }
+          withAuditLog((log) => log.record({ action: 'restore', skillName: entry.name, detail: restored }))
+          writeJson(res, 200, { ok: true, restored, name: entry.name })
+        } catch (error) {
+          logger.warn(error)
+          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.auditList,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'GET')) return
+        try {
+          const url = new URL(req.url ?? '/', 'http://x')
+          const limit = Number(queryParam(url, 'limit')) || 200
+          const skillName = queryParam(url, 'name')
+          const entries = withAuditLog((log) => log.list(limit, skillName))
+          writeJson(res, 200, { ok: true, entries })
+        } catch (error) {
+          logger.warn(error)
+          writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: ROUTES.updateOne,
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (!guard(req, res, 'POST')) return
+        try {
+          const body = (await readJsonBody(req, { maxBytes: 16 * 1024, objectOnly: true })) as { id?: string; name?: string } | null
+          const idOrName = typeof body?.id === 'string' ? body.id : typeof body?.name === 'string' ? body.name : undefined
+          if (!idOrName) {
+            writeJson(res, 400, { ok: false, error: 'expected { id } or { name }' })
+            return
+          }
+          const store = deps.centralStore ?? new CentralSkillStore(deps.centralDbPath)
+          try {
+            const skill = store.getSkillById(idOrName) ?? store.getSkillByName(idOrName)
+            if (!skill) {
+              writeJson(res, 404, { ok: false, error: `Skill "${idOrName}" not found in central store` })
+              return
+            }
+            const result = await updateOneSkill(skill, store)
+            withAuditLog((log) => log.record({
+              action: 'update',
+              skillName: result.name,
+              success: result.success,
+              detail: result.success ? `${result.previousRevision ?? '?'} -> ${result.newRevision ?? '?'}` : result.error ?? null,
+            }))
+            writeJson(res, 200, { ok: true, result })
+          } finally {
+            if (!deps.centralStore) store.close()
+          }
+        } catch (error) {
+          logger.warn(error)
+          writeJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
         }
       },
     },

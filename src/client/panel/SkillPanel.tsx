@@ -18,6 +18,7 @@ import { useSyncExternalStore } from 'react'
 import { SkillApi } from '../api.ts'
 import { tt } from '../panel-helpers.ts'
 import type { PanelController, SkillTab } from './controller.ts'
+import { BackupTab } from './BackupTab.tsx'
 import { CreateTab } from './CreateTab.tsx'
 import { EditTab } from './EditTab.tsx'
 import { ImportTab } from './ImportTab.tsx'
@@ -45,6 +46,7 @@ export function SkillPanel({ controller, api }: SkillPanelProps) {
     { id: 'market', label: () => tt('tab.market') },
     { id: 'create', label: () => tt('tab.create') },
     { id: 'import', label: () => tt('tab.import') },
+    { id: 'backup', label: () => tt('tab.backup') },
     ...(editing === undefined ? [] : [{ id: 'edit' as SkillTab, label: () => tt('tab.edit') }]),
   ]
 
@@ -79,6 +81,7 @@ export function SkillPanel({ controller, api }: SkillPanelProps) {
             onEdit={skill => { controller.openEditor(skill) }}
             onImport={() => { controller.setActiveTab('import') }}
             onDuplicate={draft => { controller.openCreateFromTemplate(draft) }}
+            onSelectTab={tab => { controller.setActiveTab(tab) }}
           />
         )}
         {activeTab === 'market' && (
@@ -89,6 +92,7 @@ export function SkillPanel({ controller, api }: SkillPanelProps) {
         )}
         {activeTab === 'create' && <CreateTab api={api} controller={controller} />}
         {activeTab === 'import' && <ImportTab api={api} />}
+        {activeTab === 'backup' && <BackupTab api={api} />}
         {activeTab === 'edit' && editing !== undefined && (
           <EditTab
             api={api}

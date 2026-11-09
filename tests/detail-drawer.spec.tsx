@@ -135,7 +135,7 @@ describe('DetailDrawer', () => {
       root.render(<DetailDrawer skill={sampleSkill} api={fakeApi as never} onClose={onClose} />)
     })
 
-    const backdrop = container.querySelector('div[class*="drawerBackdrop"]')
+    const backdrop = container.querySelector('div[class*="modalBackdrop"]')
     expect(backdrop).not.toBeNull()
     act(() => {
       backdrop?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
@@ -208,17 +208,24 @@ describe('DetailDrawer', () => {
       )
     })
 
-    const buttons = Array.from(container.querySelectorAll('button'))
-    const editBtn = buttons.find(b => b.textContent?.includes('编辑'))
-    const copyBtn = buttons.find(b => b.textContent?.includes('复制'))
+    const dialog = container
+    const editBtn = Array.from(dialog.querySelectorAll('button'))
+      .find(b => b.textContent?.includes('编辑'))
 
     expect(editBtn).toBeDefined()
-    expect(copyBtn).toBeDefined()
 
     act(() => {
       editBtn?.click()
     })
     expect(onEdit).toHaveBeenCalledWith(sampleSkill)
+
+    // The duplicate action lives in the overflow menu.
+    act(() => {
+      dialog.querySelector('button[aria-expanded]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    const copyBtn = Array.from(dialog.querySelectorAll('button'))
+      .find(b => b.textContent?.includes('复制为模板'))
+    expect(copyBtn).toBeDefined()
 
     act(() => {
       copyBtn?.click()

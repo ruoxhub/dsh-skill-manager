@@ -44,7 +44,7 @@ describe('skill-explorer host apply', () => {
   it('is a no-op for a second mount of the same package (aggregate + standalone coexist)', () => {
     const first = fakeCtx()
     apply(first as never, {})
-    expect(first.routes.length).toBe(19)
+    expect(first.routes.length).toBe(36)
     const second = fakeCtx()
     apply(second as never, {})
     expect(second.routes.length).toBe(0)
@@ -56,7 +56,7 @@ describe('skill-explorer host apply', () => {
     expect(ctx.routes.length).toBe(0)
   })
 
-  it('registers the twelve routes when enabled (default)', () => {
+  it('registers the thirty-six routes when enabled (default)', () => {
     const ctx = fakeCtx()
     apply(ctx as never, {})
     const paths = ctx.routes.map((route) => route.path)
@@ -73,13 +73,30 @@ describe('skill-explorer host apply', () => {
       '/api/dsh-skill-explorer/market/search',
       '/api/dsh-skill-explorer/market/detail',
       '/api/dsh-skill-explorer/market/install',
-      '/api/dsh-skill-explorer/suites/marketplaces',
-      '/api/dsh-skill-explorer/suites/marketplaces/add',
-      '/api/dsh-skill-explorer/suites/marketplaces/remove',
-      '/api/dsh-skill-explorer/suites/marketplaces/refresh',
-      '/api/dsh-skill-explorer/suites/plugins',
-      '/api/dsh-skill-explorer/suites/plugin-detail',
-      '/api/dsh-skill-explorer/suites/install',
+      '/api/dsh-skill-explorer/git/preview',
+      '/api/dsh-skill-explorer/git/confirm',
+      '/api/dsh-skill-explorer/git/cancel',
+      '/api/dsh-skill-explorer/check-all',
+      '/api/dsh-skill-explorer/check-one',
+      '/api/dsh-skill-explorer/update-all',
+      '/api/dsh-skill-explorer/presets',
+      '/api/dsh-skill-explorer/presets/save',
+      '/api/dsh-skill-explorer/presets/delete',
+      '/api/dsh-skill-explorer/presets/apply',
+      '/api/dsh-skill-explorer/backup/status',
+      '/api/dsh-skill-explorer/backup/init',
+      '/api/dsh-skill-explorer/backup/commit',
+      '/api/dsh-skill-explorer/backup/snapshots',
+      '/api/dsh-skill-explorer/backup/restore',
+      '/api/dsh-skill-explorer/backup/remote',
+      '/api/dsh-skill-explorer/tags',
+      '/api/dsh-skill-explorer/tags/set',
+      '/api/dsh-skill-explorer/tags/rename',
+      '/api/dsh-skill-explorer/tags/delete',
+      '/api/dsh-skill-explorer/trash',
+      '/api/dsh-skill-explorer/trash/restore',
+      '/api/dsh-skill-explorer/audit',
+      '/api/dsh-skill-explorer/update-one',
     ])
   })
 })
@@ -135,3 +152,42 @@ describe('skill-explorer host apply: provider-row custom roots (#1801)', () => {
   })
 })
 
+
+describe('skill-explorer host apply: central store wiring (#central)', () => {
+  it('the list route scans the central skills dir by default', async () => {
+    // Given a home whose central skills-manager store holds one skill, and a
+    // plugin config that overrides dshHome/agentsHome (which makes collect.ts
+    // skip its implicit central dir fallback)
+    const tmp = mkdtempSync(join(tmpdir(), 'skill-explorer-central-'))
+    const central = join(tmp, 'central', 'skills')
+    mkdirSync(join(central, 'central-skill'), { recursive: true })
+    writeFileSync(join(central, 'central-skill', 'SKILL.md'), '---\nname: central-skill\ndescription: 中央库技能\n---\n', 'utf8')
+    try {
+      const state = { routes: [] as Array<{ path?: string; handler: (req: unknown, res: unknown) => Promise<void> }> }
+      const ctx = {
+        webServer: { register: (route: { path?: string; handler: (req: unknown, res: unknown) => Promise<void> }) => { state.routes.push(route); return () => {} } },
+        skills: { snapshot: async () => ({ skills: [], complete: true }) },
+        sessions: { list: () => [] },
+        logger: { warn: () => {} },
+        effect: (fn: () => unknown) => { const d = fn(); return () => { if (typeof d === 'function') (d as () => void)() } },
+      }
+      resetMountOnce()
+      apply(ctx as never, { dshHome: join(tmp, 'dsh'), agentsHome: join(tmp, 'agents'), centralSkillsDir: central })
+
+      // When the panel asks for the list
+      const list = state.routes.find(route => route.path === '/api/dsh-skill-explorer/list')!
+      const captured = { status: 0, body: '' }
+      const res = { writeHead(status: number) { captured.status = status }, end(body: string) { captured.body = body } }
+      const req = { url: '/api/dsh-skill-explorer/list', method: 'GET', socket: { remoteAddress: '127.0.0.1' }, headers: { host: 'localhost:3080' } }
+      await list.handler(req, res)
+
+      // Then the central skill is listed under its own group
+      expect(captured.status).toBe(200)
+      const payload = JSON.parse(captured.body)
+      const group = payload.groups.find((g: { key: string }) => g.key === 'central-store')
+      expect(group?.skills.map((s: { name: string }) => s.name)).toEqual(['central-skill'])
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+})

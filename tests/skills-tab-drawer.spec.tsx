@@ -68,6 +68,7 @@ describe('SkillsTab DetailDrawer integration', () => {
           onEdit={() => {}}
           onImport={() => {}}
           onDuplicate={() => {}}
+          onSelectTab={() => {}}
         />
       )
     })

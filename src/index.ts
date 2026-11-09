@@ -14,7 +14,7 @@ import { basename, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { makeRoutes, ROUTES } from './routes.ts'
-import { ensureInitialized } from './suites/manager.ts'
+import { getCentralSkillsDir } from './central-store.ts'
 import { customSkillDirsFromLoader, normalizeSkillRoots, type CollectOptions, type LoaderEntryLike } from './collect.ts'
 import { mountOnce } from './mount-once.ts'
 
@@ -63,6 +63,8 @@ export interface Config {
   dshHome?: string
   /** User agents config root override (defaults to $DSH_AGENTS_HOME or ~/.agents). */
   agentsHome?: string
+  /** Central skills-manager skills dir override (defaults to ~/.agents/skills-manager/skills). */
+  centralSkillsDir?: string
 }
 
 /**
@@ -75,11 +77,6 @@ function applyImpl(ctx: Context, config?: Config): void {
   const skillCtx = ctx as unknown as SkillContext
   const dshHome = config?.dshHome ?? process.env.DSH_HOME ?? homedir() + sep + '.dsh'
   const agentsHome = config?.agentsHome ?? process.env.DSH_AGENTS_HOME ?? homedir() + sep + '.agents'
-  try {
-    ensureInitialized(agentsHome)
-  } catch {
-    // Non-fatal
-  }
   /**
    * Every custom skill root the panel should scan: this plugin's own config
    * plus whatever the live `skill-filesystem` rows declare. The official
@@ -138,6 +135,10 @@ function applyImpl(ctx: Context, config?: Config): void {
   const routes = makeRoutes(ctx, {
     dshHome,
     agentsHome,
+    // Explicit: collect.ts skips the implicit central dir once dshHome/
+    // agentsHome are given, so without this the central store group never
+    // appeared in the panel.
+    centralSkillsDir: config?.centralSkillsDir ?? getCentralSkillsDir(),
     customSkillDirs,
     registry: skillCtx.skills,
     activeSessionCwds,

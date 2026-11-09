@@ -124,6 +124,66 @@ describe('collectSkills', () => {
     expect(skills.length).toBe(8)
   })
 
+  it('keeps global skills user-level when the home directory is a workspace', async () => {
+    // Given a home directory registered as a workspace, so joining it with the
+    // project conventions lands exactly on the two global skill roots
+    const home = join(TMP, 'home-as-workspace')
+    write(join(home, '.agents', 'skills', 'global-agent', 'SKILL.md'), '---\nname: global-agent\ndescription: 全局 agents 技能\n---\n')
+    write(join(home, '.dsh', 'skills', 'global-dsh', 'SKILL.md'), '---\nname: global-dsh\ndescription: 全局 dsh 技能\n---\n')
+
+    // When that home is the workspace and also carries the global roots
+    const { skills } = await collectSkills({
+      cwd: home,
+      projectRoots: [home],
+      customSkillDirs: [],
+      dshHome: join(home, '.dsh'),
+      agentsHome: join(home, '.agents'),
+      registry: { snapshot: async () => ({ skills: [], complete: true }) },
+    })
+
+    // Then the skills stay user-level rather than being claimed by a "project"
+    // named after the home directory, which outranks user sources and left the
+    // panel's "User skills" filter matching nothing
+    const byName = Object.fromEntries(skills.map((s) => [s.name, s]))
+    expect(byName['global-agent'].level).toBe('user-agents')
+    expect(byName['global-dsh'].level).toBe('user-dsh')
+    expect(byName['global-agent'].workspaceRoot).toBeUndefined()
+    // Each skill is listed once, not once per coinciding root
+    expect(skills.filter((s) => s.name === 'global-agent')).toHaveLength(1)
+  })
+
+  it('lists a deployed skill under the agent root that loads it, not the library it came from', async () => {
+    // Given the central library and an agent root holding the same skill: the
+    // library is where an install lands, and deployment copies it into the root
+    // the harness actually loads from
+    const library = join(TMP, 'lib-for-deploy')
+    const agentsHome = join(TMP, 'agents-for-deploy')
+    write(join(library, 'shared-skill', 'SKILL.md'), '---\nname: shared-skill\ndescription: 库里的同一技能\n---\n')
+    write(join(agentsHome, 'skills', 'shared-skill', 'SKILL.md'), '---\nname: shared-skill\ndescription: 部署后的同一技能\n---\n')
+    // A library-only skill, which is NOT deployed anywhere
+    write(join(library, 'library-only', 'SKILL.md'), '---\nname: library-only\ndescription: 仅存在于库中\n---\n')
+
+    // When both roots are collected
+    const { skills } = await collectSkills({
+      cwd: PROJ,
+      projectRoots: [PROJ],
+      customSkillDirs: [],
+      dshHome: HOME,
+      agentsHome,
+      centralSkillsDir: library,
+      registry: { snapshot: async () => ({ skills: [], complete: true }) },
+    })
+
+    // Then the deployed copy is the one shown, under the agent root, because
+    // that is the file the model receives; ranking the library copy above it
+    // moved every deployed skill out of "User skills"
+    const byName = Object.fromEntries(skills.map((s) => [s.name, s]))
+    expect(byName['shared-skill'].level).toBe('user-agents')
+    expect(byName['shared-skill'].path).toBe(join(agentsHome, 'skills', 'shared-skill', 'SKILL.md'))
+    // A library-only skill still appears, from the library
+    expect(byName['library-only'].level).toBe('central-store')
+  })
+
   it('degrades when the registry snapshot throws', async () => {
     const broken = { snapshot: async () => { throw new Error('registry boom') } }
     const { skills, complete } = await collectSkills({

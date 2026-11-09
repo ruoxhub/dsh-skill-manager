@@ -19,7 +19,7 @@ import type { SkillEntry } from '../api.ts'
 export const SKILL_EXPLORER_PANEL_ID = 'skill-explorer'
 
 /** The panel's tab identifiers. */
-export type SkillTab = 'skills' | 'create' | 'import' | 'edit' | 'market'
+export type SkillTab = 'skills' | 'create' | 'import' | 'edit' | 'market' | 'backup'
 
 /**
  * A new-skill draft prefilled from an existing skill ("duplicate as

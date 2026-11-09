@@ -82,6 +82,7 @@ describe('SkillsTab Batch Delete', () => {
           onEdit={() => {}}
           onImport={() => {}}
           onDuplicate={() => {}}
+          onSelectTab={() => {}}
         />
       )
     })
@@ -121,6 +122,48 @@ describe('SkillsTab Batch Delete', () => {
     expect(fakeApi.remove).toHaveBeenCalledWith('skill-b', '/work/.dsh/skills/skill-b/SKILL.md')
     expect(fakeApi.remove).not.toHaveBeenCalledWith('skill-linked', expect.anything())
 
+    root.unmount()
+  })
+
+  it('renders narrowed count format when filter or search is applied', async () => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+
+    const fakeApi = {
+      list: vi.fn().mockResolvedValue(samplePayload),
+      setEnabled: vi.fn(),
+      setProviderEnabled: vi.fn(),
+      remove: vi.fn(),
+      read: vi.fn(),
+    }
+
+    await act(async () => {
+      root.render(
+        <SkillsTab
+          api={fakeApi as never}
+          onEdit={() => {}}
+          onImport={() => {}}
+          onDuplicate={() => {}}
+          onSelectTab={() => {}}
+        />
+      )
+    })
+
+    const titleEl = container.querySelector('h1[class*="headerTitle"]') as HTMLHeadingElement
+    expect(titleEl).not.toBeNull()
+    // Initial: 3 total
+    expect(titleEl.textContent).toContain('(3)')
+
+    // Filter by selecting workspace "system"
+    const select = container.querySelector('select[class*="select"]') as HTMLSelectElement
+    expect(select).not.toBeNull()
+    await act(async () => {
+      select.value = 'system'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+
+    expect(titleEl.textContent).toContain('(0/3)')
     root.unmount()
   })
 })

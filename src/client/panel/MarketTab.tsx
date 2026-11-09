@@ -4,7 +4,7 @@ import { tt } from '../panel-helpers.ts'
 import type { SkillCard } from '../../skillhub/types.ts'
 import type { SkillDraft } from './controller.ts'
 import { MarketDetailDrawer } from './MarketDetailDrawer.tsx'
-import { SuiteMarketView } from './SuiteMarketView.tsx'
+import { GitInstallView } from './GitInstallView.tsx'
 import css from './panel.module.css'
 
 export interface MarketTabProps {
@@ -15,7 +15,7 @@ export interface MarketTabProps {
 
 const SUBTABS = [
   { id: 'skillhub', labelKey: 'market.subtab.skillhub' },
-  { id: 'suite', labelKey: 'market.subtab.suite' },
+  { id: 'git', labelKey: 'market.subtab.git' },
 ] as const
 
 const SORT_OPTIONS = [
@@ -26,29 +26,30 @@ const SORT_OPTIONS = [
 ] as const
 
 const CATEGORIES = [
-  { id: 'all', label: '全部' },
-  { id: 'pay-skill', label: 'Pay Skill' },
-  { id: 'office-efficiency', label: '办公效率' },
-  { id: 'content-creation', label: '内容创作' },
-  { id: 'dev-programming', label: '开发编程' },
-  { id: 'data-analysis', label: '数据分析' },
-  { id: 'design-media', label: '设计多媒体' },
-  { id: 'ai-agent', label: 'AI Agent' },
-  { id: 'knowledge-management', label: '知识管理' },
-  { id: 'business-ops', label: '商业运营' },
-  { id: 'education', label: '教育学习' },
-  { id: 'professional', label: '行业专业' },
-  { id: 'it-ops-security', label: 'IT 运维与安全' },
-  { id: 'life-service', label: '生活服务' },
+  { id: 'all', labelKey: 'market.category.all' },
+  { id: 'pay-skill', labelKey: 'market.category.pay-skill' },
+  { id: 'office-efficiency', labelKey: 'market.category.office-efficiency' },
+  { id: 'content-creation', labelKey: 'market.category.content-creation' },
+  { id: 'dev-programming', labelKey: 'market.category.dev-programming' },
+  { id: 'data-analysis', labelKey: 'market.category.data-analysis' },
+  { id: 'design-media', labelKey: 'market.category.design-media' },
+  { id: 'ai-agent', labelKey: 'market.category.ai-agent' },
+  { id: 'knowledge-management', labelKey: 'market.category.knowledge-management' },
+  { id: 'business-ops', labelKey: 'market.category.business-ops' },
+  { id: 'education', labelKey: 'market.category.education' },
+  { id: 'professional', labelKey: 'market.category.professional' },
+  { id: 'it-ops-security', labelKey: 'market.category.it-ops-security' },
+  { id: 'life-service', labelKey: 'market.category.life-service' },
 ] as const
 
-const AVATAR_COLORS = [
-  { bg: '#dbeafe', color: '#1d4ed8' },
-  { bg: '#fef3c7', color: '#b45309' },
-  { bg: '#fee2e2', color: '#b91c1c' },
-  { bg: '#e0e7ff', color: '#4338ca' },
-  { bg: '#f3e8ff', color: '#7e22ce' },
-  { bg: '#ccfbf1', color: '#0f766e' },
+/** Theme-certified pastel/tint palette resolving to official tokens */
+const AVATAR_PALETTES = [
+  { bg: 'var(--dsw-alias-interactive-bg-hover)', color: 'var(--dsw-alias-state-business-primary)' },
+  { bg: 'var(--dsw-alias-interactive-bg-hover)', color: 'var(--dsw-alias-state-warn-primary)' },
+  { bg: 'var(--dsw-alias-interactive-bg-hover)', color: 'var(--dsw-alias-state-error-primary)' },
+  { bg: 'var(--dsw-alias-interactive-bg-hover)', color: 'var(--dsw-alias-state-success-primary)' },
+  { bg: 'var(--dsw-alias-interactive-bg-hover)', color: 'var(--dsw-alias-interactive-primary)' },
+  { bg: 'var(--dsw-alias-interactive-bg-hover)', color: 'var(--dsw-alias-state-business-primary)' },
 ]
 
 const PAGE_SIZE = 30
@@ -56,11 +57,11 @@ const PAGE_SIZE = 30
 function getAvatarPalette(name: string): { bg: string; color: string } {
   let hash = 0
   for (let i = 0; i < name.length; i++) {
-    hash = (hash << 5) - hash + name.charCodeAt(i)
+    hash = ((hash << 5) - hash) + name.charCodeAt(i)
     hash |= 0
   }
-  const index = Math.abs(hash) % AVATAR_COLORS.length
-  return AVATAR_COLORS[index]
+  const index = Math.abs(hash) % AVATAR_PALETTES.length
+  return AVATAR_PALETTES[index]!
 }
 
 function formatCount(num: number): string {
@@ -180,7 +181,7 @@ export function MarketTab({ api, onInstalled, onDuplicate }: MarketTabProps): Re
 
   // Initial load & filter/sort change resets to page 1
   useEffect(() => {
-    if (subtab === 'suite') return
+    if (subtab === 'git') return
     pageRef.current = 1
     hasMoreRef.current = true
     setPage(1)
@@ -265,7 +266,7 @@ export function MarketTab({ api, onInstalled, onDuplicate }: MarketTabProps): Re
       setInstalledSet(prev => new Set(prev).add(skill.slug))
       onInstalled?.(skill.slug)
     } catch (err) {
-      alert(tt('market.installFailed', { error: err instanceof Error ? err.message : String(err) }))
+      setError(tt('market.installFailed', { error: err instanceof Error ? err.message : String(err) }))
     } finally {
       setInstallingMap(prev => ({ ...prev, [skill.slug]: false }))
     }
@@ -280,15 +281,17 @@ export function MarketTab({ api, onInstalled, onDuplicate }: MarketTabProps): Re
             <button
               key={tab.id}
               type="button"
+              role="tab"
+              aria-selected={subtab === tab.id}
               className={`${css.marketSubtabBtn}${subtab === tab.id ? ` ${css.activeSubtab}` : ''}`}
               onClick={() => setSubtab(tab.id)}
             >
-              {tt(tab.labelKey as any)}
+              {tt(tab.labelKey)}
             </button>
           ))}
         </div>
 
-        {subtab !== 'suite' && (
+        {subtab === 'skillhub' && (
           <>
             <form className={css.marketSearchForm} onSubmit={handleSearchSubmit}>
               <svg className={css.searchIcon} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -317,7 +320,7 @@ export function MarketTab({ api, onInstalled, onDuplicate }: MarketTabProps): Re
                   className={`${css.marketSortBtn}${sort === opt.id ? ` ${css.activeSort}` : ''}`}
                   onClick={() => handleSortSelect(opt.id)}
                 >
-                  {tt(opt.labelKey as any)}
+                  {tt(opt.labelKey)}
                 </button>
               ))}
             </div>
@@ -325,194 +328,209 @@ export function MarketTab({ api, onInstalled, onDuplicate }: MarketTabProps): Re
         )}
       </div>
 
-      {subtab === 'suite' ? (
-        <SuiteMarketView api={api} onInstalled={onInstalled} onDuplicate={onDuplicate} />
+      {subtab === 'git' ? (
+        <GitInstallView api={api} onInstalled={() => onInstalled?.('')} workspaces={workspaces} />
       ) : (
         <>
           {/* 分类筛选条 */}
           <div className={css.marketCategoryBar}>
-        <div className={css.marketCategoryList}>
-          {CATEGORIES.map(cat => (
-            <button
-              key={cat.id}
-              type="button"
-              className={`${css.marketCategoryPill}${category === cat.id ? ` ${css.activePill}` : ''}`}
-              onClick={() => handleCategorySelect(cat.id)}
-            >
-              {cat.label}
-            </button>
-          ))}
-        </div>
-        <a
-          href="https://skillhub.cn"
-          target="_blank"
-          rel="noopener noreferrer"
-          className={css.marketExternalLink}
-          title="访问 SkillHub 官网"
-        >
-          skillhub.cn
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
-            <polyline points="15 3 21 3 21 9"></polyline>
-            <line x1="10" y1="14" x2="21" y2="3"></line>
-          </svg>
-        </a>
-      </div>
-
-      {/* 错误提示 */}
-      {error !== undefined && <div className={css.banner} data-kind="error">{error}</div>}
-
-      {/* 卡片网格（带滚动翻页监听） */}
-      <div
-        ref={containerRef}
-        className={css.marketGridContainer}
-        onScroll={handleScroll}
-        data-dsh-part="market-grid-container"
-      >
-        {loading && items.length === 0 ? (
-          <p className={css.empty}>{tt('list.loading')}</p>
-        ) : items.length === 0 ? (
-          <p className={css.empty}>{tt('market.empty')}</p>
-        ) : (
-          <div className={css.marketGrid}>
-            {items.map(skill => {
-              const isInstalled = installedSet.has(skill.slug)
-              const isInstalling = !!installingMap[skill.slug]
-              const palette = getAvatarPalette(skill.name || skill.slug)
-              const letter = (skill.name || skill.slug).charAt(0).toUpperCase()
-
-              return (
-                <div
-                  key={skill.slug}
-                  className={css.marketCard}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => setDetailSkill(skill)}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault()
-                      setDetailSkill(skill)
-                    }
-                  }}
+            <div className={css.marketCategoryList}>
+              {CATEGORIES.map(cat => (
+                <button
+                  key={cat.id}
+                  type="button"
+                  className={`${css.marketCategoryPill}${category === cat.id ? ` ${css.activePill}` : ''}`}
+                  onClick={() => handleCategorySelect(cat.id)}
                 >
-                  <div className={css.marketCardIconWrapper}>
-                    {skill.iconUrl ? (
-                      <img
-                        src={skill.iconUrl}
-                        alt=""
-                        className={css.marketCardIcon}
-                        onError={e => {
-                          e.currentTarget.style.display = 'none'
-                          if (e.currentTarget.nextElementSibling) {
-                            (e.currentTarget.nextElementSibling as HTMLElement).style.display = 'flex'
-                          }
-                        }}
-                      />
-                    ) : null}
-                    <div
-                      className={css.marketCardAvatarFallback}
-                      style={{
-                        backgroundColor: palette.bg,
-                        color: palette.color,
-                        display: skill.iconUrl ? 'none' : 'flex',
-                      }}
-                      aria-hidden="true"
-                    >
-                      {letter}
-                    </div>
-                  </div>
-
-                  <div className={css.marketCardBody}>
-                    <div className={css.marketCardTitleRow}>
-                      <span className={css.marketCardTitle} title={skill.name || skill.slug}>
-                        {skill.name || skill.slug}
-                      </span>
-                      {skill.verified && (
-                        <span className={css.marketVerifiedBadge} title={skill.publisherName || '认证作者'}>
-                          ✓
-                        </span>
-                      )}
-                    </div>
-                    {(skill.categoryLabel || skill.isPaid) && (
-                      <div className={css.marketBadgeRow}>
-                        {skill.categoryLabel ? (
-                          <span className={css.marketCategoryBadge}>{skill.categoryLabel}</span>
-                        ) : null}
-                        {skill.isPaid ? (
-                          <span className={css.marketPayBadge}>Pay Skill</span>
-                        ) : null}
-                      </div>
-                    )}
-                    <p className={css.marketCardDesc} title={skill.description}>
-                      {skill.description || '暂无描述'}
-                    </p>
-                    <div className={css.marketCardStats}>
-                      <span className={css.marketStatItem} title="下载量">
-                        ↓ {formatCount(skill.downloads)}
-                      </span>
-                      <span className={css.marketStatItem} title="收藏数">
-                        ☆ {skill.stars || 0}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className={css.marketCardAction}>
-                    <button
-                      type="button"
-                      data-dsh-action="install"
-                      className={`${css.marketInstallBtn}${isInstalled ? ` ${css.marketInstallBtnDone}` : ''}`}
-                      disabled={isInstalling || isInstalled}
-                      title={isInstalled ? tt('market.installed') : isInstalling ? tt('market.installing') : tt('market.install')}
-                      onClick={e => {
-                        e.stopPropagation()
-                        void handleQuickInstall(skill)
-                      }}
-                    >
-                      {isInstalling ? (
-                        <span className={css.marketSpinner} aria-hidden="true" />
-                      ) : isInstalled ? (
-                        <span aria-hidden="true">✓</span>
-                      ) : (
-                        <span aria-hidden="true">+</span>
-                      )}
-                    </button>
-                  </div>
-                </div>
-              )
-            })}
-
-            {/* 滚动翻页加载指示器 */}
-            {loadingMore && (
-              <div className={css.marketLoadingMore}>
-                <span className={css.marketSpinner} aria-hidden="true" />
-                <span>{tt('market.loadingMore')}</span>
-              </div>
-            )}
-
-            {!hasMore && items.length > 0 && (
-              <div className={css.marketNoMore}>
-                <span>{tt('market.noMore')} ({total > 0 ? total : items.length})</span>
-              </div>
-            )}
-
-            {/* 底部哨兵元素 */}
-            <div ref={sentinelRef} className={css.marketSentinel} data-dsh-part="market-sentinel" />
+                  {tt(cat.labelKey)}
+                </button>
+              ))}
+            </div>
+            <a
+              href="https://skillhub.cn"
+              target="_blank"
+              rel="noopener noreferrer"
+              className={css.marketExternalLink}
+              title={tt('market.visitOfficial')}
+            >
+              skillhub.cn
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                <polyline points="15 3 21 3 21 9"></polyline>
+                <line x1="10" y1="14" x2="21" y2="3"></line>
+              </svg>
+            </a>
           </div>
-        )}
-      </div>
 
-      {/* 技能详情抽屉 */}
-      <MarketDetailDrawer
-        skill={detailSkill}
-        api={api}
-        installed={detailSkill ? installedSet.has(detailSkill.slug) : false}
-        workspaces={workspaces}
-        onClose={() => setDetailSkill(null)}
-        onInstalled={slug => {
-          setInstalledSet(prev => new Set(prev).add(slug))
-          onInstalled?.(slug)
-        }}
-      />
+          {/* 错误提示 */}
+          {error !== undefined && <div className={css.banner} data-kind="error">{error}</div>}
+
+          {/* 卡片网格（带滚动翻页监听） */}
+          <div
+            ref={containerRef}
+            className={css.marketGridContainer}
+            onScroll={handleScroll}
+            data-dsh-part="market-grid-container"
+          >
+            {loading && items.length === 0 ? (
+              <p className={css.empty}>{tt('list.loading')}</p>
+            ) : items.length === 0 ? (
+              <p className={css.empty}>{tt('market.empty')}</p>
+            ) : (
+              <div className={css.marketGrid}>
+                {items.map(skill => {
+                  const isInstalled = installedSet.has(skill.slug)
+                  const isInstalling = !!installingMap[skill.slug]
+                  const palette = getAvatarPalette(skill.name || skill.slug)
+                  const letter = (skill.name || skill.slug).charAt(0).toUpperCase()
+
+                  return (
+                    <div
+                      key={skill.slug}
+                      className={css.marketCard}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setDetailSkill(skill)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          setDetailSkill(skill)
+                        }
+                      }}
+                    >
+                      <div className={css.marketCardIconWrapper}>
+                        {skill.iconUrl ? (
+                          <img
+                            src={skill.iconUrl}
+                            alt=""
+                            className={css.marketCardIcon}
+                            onError={e => {
+                              e.currentTarget.style.display = 'none'
+                              if (e.currentTarget.nextElementSibling) {
+                                (e.currentTarget.nextElementSibling as HTMLElement).style.display = 'flex'
+                              }
+                            }}
+                          />
+                        ) : null}
+                        <div
+                          className={css.marketCardAvatarFallback}
+                          style={{
+                            backgroundColor: palette.bg,
+                            color: palette.color,
+                            display: skill.iconUrl ? 'none' : 'flex',
+                          }}
+                          aria-hidden="true"
+                        >
+                          {letter}
+                        </div>
+                      </div>
+
+                      <div className={css.marketCardBody}>
+                        <div className={css.marketCardTitleRow}>
+                          <span className={css.marketCardTitle} title={skill.name || skill.slug}>
+                            {skill.name || skill.slug}
+                          </span>
+                          {skill.verified && (
+                            <span className={css.marketVerifiedBadge} title={skill.publisherName || tt('market.verifiedAuthor')}>
+                              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                <polyline points="20 6 9 17 4 12" />
+                              </svg>
+                            </span>
+                          )}
+                        </div>
+                        {(skill.categoryLabel || skill.isPaid) && (
+                          <div className={css.marketBadgeRow}>
+                            {skill.categoryLabel ? (
+                              <span className={css.marketCategoryBadge}>{skill.categoryLabel}</span>
+                            ) : null}
+                            {skill.isPaid ? (
+                              <span className={css.marketPayBadge}>Pay Skill</span>
+                            ) : null}
+                          </div>
+                        )}
+                        <p className={css.marketCardDesc} title={skill.description}>
+                          {skill.description || tt('market.noDesc')}
+                        </p>
+                        <div className={css.marketCardStats}>
+                          <span className={css.marketStatItem} title={tt('market.downloadsTitle')}>
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ display: 'inline-block', verticalAlign: '-1px', marginRight: '3px' }}>
+                              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                              <polyline points="7 10 12 15 17 10" />
+                              <line x1="12" y1="15" x2="12" y2="3" />
+                            </svg>
+                            {formatCount(skill.downloads)}
+                          </span>
+                          <span className={css.marketStatItem} title={tt('market.starsTitle')}>
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ display: 'inline-block', verticalAlign: '-1px', marginRight: '3px' }}>
+                              <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+                            </svg>
+                            {skill.stars || 0}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className={css.marketCardAction}>
+                        <button
+                          type="button"
+                          data-dsh-action="install"
+                          className={`${css.marketInstallBtn}${isInstalled ? ` ${css.marketInstallBtnDone}` : ''}`}
+                          disabled={isInstalling || isInstalled}
+                          title={isInstalled ? tt('market.installed') : isInstalling ? tt('market.installing') : tt('market.install')}
+                          onClick={e => {
+                            e.stopPropagation()
+                            void handleQuickInstall(skill)
+                          }}
+                        >
+                          {isInstalling ? (
+                            <span className={css.marketSpinner} aria-hidden="true" />
+                          ) : isInstalled ? (
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                              <polyline points="20 6 9 17 4 12" />
+                            </svg>
+                          ) : (
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                              <line x1="12" y1="5" x2="12" y2="19" />
+                              <line x1="5" y1="12" x2="19" y2="12" />
+                            </svg>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })}
+
+                {/* 滚动翻页加载指示器 */}
+                {loadingMore && (
+                  <div className={css.marketLoadingMore}>
+                    <span className={css.marketSpinner} aria-hidden="true" />
+                    <span>{tt('market.loadingMore')}</span>
+                  </div>
+                )}
+
+                {!hasMore && items.length > 0 && (
+                  <div className={css.marketNoMore}>
+                    <span>{tt('market.noMore')} ({total > 0 ? total : items.length})</span>
+                  </div>
+                )}
+
+                {/* 底部哨兵元素 */}
+                <div ref={sentinelRef} className={css.marketSentinel} data-dsh-part="market-sentinel" />
+              </div>
+            )}
+          </div>
+
+          {/* 技能详情抽屉 */}
+          <MarketDetailDrawer
+            skill={detailSkill}
+            api={api}
+            installed={detailSkill ? installedSet.has(detailSkill.slug) : false}
+            workspaces={workspaces}
+            onClose={() => setDetailSkill(null)}
+            onInstalled={slug => {
+              setInstalledSet(prev => new Set(prev).add(slug))
+              onInstalled?.(slug)
+            }}
+          />
         </>
       )}
     </div>

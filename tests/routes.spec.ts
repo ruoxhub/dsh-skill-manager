@@ -3,11 +3,12 @@
  * set-enabled/delete dispatch (fake IncomingMessage + ServerResponse, temp
  * skill roots).
  */
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, symlinkSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { afterAll, describe, expect, it, vi } from 'vitest'
+import { CentralSkillStore } from '../src/central-store.ts'
 import { ROUTES, makeRoutes } from '../src/routes.ts'
 import { providerToggleFile } from '../src/provider-toggles.ts'
 import { buildZip } from './zip-builder.ts'
@@ -274,7 +275,7 @@ describe('create', () => {
     const { res, status, body } = response()
     await find(ROUTES.create)!.handler(request(ROUTES.create, 'POST', { body: { root: 'user', name: 'new-skill', description: '新技能', whenToUse: '测试', content: '正文', cwd: PROJ } }), res)
     expect(status()).toBe(200)
-    const target = join(HOME, 'skills', 'new-skill', 'SKILL.md')
+    const target = join(deps.agentsHome, 'skills', 'new-skill', 'SKILL.md')
     expect(JSON.parse(body()).path).toBe(target)
     expect(existsSync(target)).toBe(true)
     expect(readFileSync(target, 'utf8')).toContain("description: '新技能'")
@@ -327,12 +328,72 @@ describe('create', () => {
 })
 
 describe('delete', () => {
-  it('moves a skill into .trash', async () => {
-    const { res, status } = response()
-    const path = join(HOME, 'skills', 'new-skill', 'SKILL.md')
-    await find(ROUTES.delete)!.handler(request(ROUTES.delete, 'POST', { body: { name: 'new-skill', path } }), res)
+  it('moves the whole skill directory into .trash, keeping the skill name', async () => {
+    // Given a deployed skill that also ships a script next to its SKILL.md
+    const skillDir = join(deps.agentsHome, 'skills', 'trashed-skill')
+    mkdirSync(join(skillDir, 'scripts'), { recursive: true })
+    writeFileSync(join(skillDir, 'SKILL.md'), '---\nname: trashed-skill\ndescription: 待删除\n---\n', 'utf8')
+    writeFileSync(join(skillDir, 'scripts', 'run.sh'), 'echo hi\n', 'utf8')
+
+    // When the operator deletes it
+    const { res, status, body } = response()
+    await find(ROUTES.delete)!.handler(request(ROUTES.delete, 'POST', { body: { name: 'trashed-skill', path: join(skillDir, 'SKILL.md') } }), res)
+
+    // Then nothing is left in the live root and the trashed folder still carries
+    // the script, under a name that says which skill it was
     expect(status()).toBe(200)
-    expect(existsSync(join(HOME, 'skills', 'new-skill', 'SKILL.md'))).toBe(false)
+    expect(existsSync(skillDir)).toBe(false)
+    expect(existsSync(join(skillDir, 'scripts', 'run.sh'))).toBe(false)
+    const moved = JSON.parse(body()).moved as string
+    expect(basename(moved)).toContain('trashed-skill')
+    expect(existsSync(join(moved, 'scripts', 'run.sh'))).toBe(true)
+    expect(JSON.parse(body()).removedCentral).toEqual({ targets: [] })
+    rmSync(join(deps.agentsHome, 'skills', '.trash'), { recursive: true, force: true })
+  })
+
+  it('deleting two skills in the same instant keeps both trash entries apart', async () => {
+    // Given two sibling skills
+    const first = join(deps.agentsHome, 'skills', 'same-name-a')
+    const second = join(deps.agentsHome, 'skills', 'same-name-b')
+    for (const [dir, name] of [[first, 'same-name-a'], [second, 'same-name-b']] as const) {
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: 同名冲突\n---\n`, 'utf8')
+    }
+    const trashDir = join(deps.agentsHome, 'skills', '.trash')
+
+    // When both are deleted in the same millisecond
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
+    try {
+      for (const [dir, name] of [[first, 'same-name-a'], [second, 'same-name-b']] as const) {
+        const { res } = response()
+        await find(ROUTES.delete)!.handler(request(ROUTES.delete, 'POST', { body: { name, path: join(dir, 'SKILL.md') } }), res)
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+
+    // Then neither trash entry overwrote the other
+    expect(readdirSync(trashDir).sort()).toEqual(['2026-01-01T00-00-00-000Z-same-name-a', '2026-01-01T00-00-00-000Z-same-name-b'])
+    rmSync(trashDir, { recursive: true, force: true })
+  })
+
+  it('a single-file skill is deleted as a file, leaving its neighbours alone', async () => {
+    // Given a lone <name>.md skill beside an unrelated file in the same root
+    const root = join(deps.agentsHome, 'skills')
+    writeFileSync(join(root, 'lone-skill.md'), '---\nname: lone-skill\ndescription: 单文件\n---\n', 'utf8')
+    writeFileSync(join(root, 'notes.md'), 'unrelated\n', 'utf8')
+
+    // When it is deleted
+    const { res, status } = response()
+    await find(ROUTES.delete)!.handler(request(ROUTES.delete, 'POST', { body: { name: 'lone-skill', path: join(root, 'lone-skill.md') } }), res)
+
+    // Then only the skill file moved
+    expect(status()).toBe(200)
+    expect(existsSync(join(root, 'lone-skill.md'))).toBe(false)
+    expect(existsSync(join(root, 'notes.md'))).toBe(true)
+    rmSync(join(root, '.trash'), { recursive: true, force: true })
+    rmSync(join(root, 'notes.md'), { force: true })
   })
 
   it('refuses to delete a linked skill (target is left in place)', async () => {
@@ -383,6 +444,126 @@ describe('delete', () => {
       expect(existsSync(fixture.userFile)).toBe(true)
     } finally {
       rmSync(fixture.root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('delete: central-store bookkeeping', () => {
+  it('removes the central row, the central copy and the deployed copies too', async () => {
+    // Given a skill the central store manages: a scanned folder, a central copy,
+    // a deployed copy and the database row that keeps it listed
+    const root = mkdtempSync(join(tmpdir(), 'skill-explorer-central-'))
+    const agents = join(root, 'agents')
+    const centralCopy = join(root, 'central', 'central-skill')
+    const deployedCopy = join(root, 'deployed', 'central-skill')
+    for (const dir of [centralCopy, deployedCopy]) {
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, 'SKILL.md'), '---\nname: central-skill\ndescription: 中央技能\n---\n', 'utf8')
+    }
+    const store = new CentralSkillStore(':memory:', true)
+    store.upsertSkill({ name: 'central-skill', sourceType: 'git', sourceRef: 'https://example.com/repo', centralPath: centralCopy })
+    const record = store.getSkillByName('central-skill')!
+    store.upsertSkillTarget({ skillId: record.id, tool: 'agents', targetPath: deployedCopy })
+    const isolatedRoutes = makeRoutes(emptyCtx, {
+      ...deps,
+      agentsHome: agents,
+      centralSkillsDir: join(root, 'central'),
+      centralStore: store,
+    })
+    try {
+      // When the operator deletes the central copy the panel lists
+      const { res, status, body } = response()
+      await isolatedRoutes.find(route => route.path === ROUTES.delete)!.handler(
+        request(ROUTES.delete, 'POST', { body: { name: 'central-skill', path: join(centralCopy, 'SKILL.md') } }),
+        res,
+      )
+
+      // Then every surface that would keep showing the skill is cleared, each
+      // copy kept recoverable under its own .trash
+      expect(status()).toBe(200)
+      const removed = JSON.parse(body()).removedCentral as { targets: string[] }
+      expect(removed.targets).toHaveLength(1)
+      expect(existsSync(centralCopy)).toBe(false)
+      expect(existsSync(deployedCopy)).toBe(false)
+      expect(readdirSync(join(root, 'central', '.trash')).some((name) => name.endsWith('-central-skill'))).toBe(true)
+      expect(readdirSync(join(root, 'deployed', '.trash')).some((name) => name.endsWith('-central-skill'))).toBe(true)
+      expect(store.getSkillByName('central-skill')).toBeUndefined()
+      expect(store.getSkillTargets(record.id)).toEqual([])
+    } finally {
+      store.close()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('a same-name project skill shadowing a central one leaves the central row alone', async () => {
+    // Given a project skill and a central skill that share a name, where the
+    // panel listed (and the user deleted) the project one
+    const root = mkdtempSync(join(tmpdir(), 'skill-explorer-shadow-'))
+    const project = join(root, 'project')
+    const projectDir = join(project, '.dsh', 'skills', 'shadow-skill')
+    const centralCopy = join(root, 'central', 'shadow-skill')
+    mkdirSync(projectDir, { recursive: true })
+    mkdirSync(centralCopy, { recursive: true })
+    mkdirSync(join(project, '.git'), { recursive: true })
+    writeFileSync(join(projectDir, 'SKILL.md'), '---\nname: shadow-skill\ndescription: 项目同名\n---\n', 'utf8')
+    writeFileSync(join(centralCopy, 'SKILL.md'), '---\nname: shadow-skill\ndescription: 中央同名\n---\n', 'utf8')
+    const store = new CentralSkillStore(':memory:', true)
+    store.upsertSkill({ name: 'shadow-skill', sourceType: 'git', centralPath: centralCopy })
+    const isolatedRoutes = makeRoutes(emptyCtx, {
+      ...deps,
+      agentsHome: join(root, 'agents'),
+      centralStore: store,
+      activeSessionCwds: () => [project],
+    })
+    try {
+      // When the project skill is deleted
+      const { res, status, body } = response()
+      await isolatedRoutes.find(route => route.path === ROUTES.delete)!.handler(
+        request(ROUTES.delete, 'POST', { body: { name: 'shadow-skill', path: join(projectDir, 'SKILL.md') } }),
+        res,
+      )
+
+      // Then the central skill keeps its row and its copy
+      expect(status()).toBe(200)
+      expect(JSON.parse(body()).removedCentral).toEqual({ targets: [] })
+      expect(store.getSkillByName('shadow-skill')).toBeDefined()
+      expect(existsSync(join(centralCopy, 'SKILL.md'))).toBe(true)
+    } finally {
+      store.close()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('deleting a skill the store does not track touches no central state', async () => {
+    // Given a plain user skill and a central store that never heard of it
+    const root = mkdtempSync(join(tmpdir(), 'skill-explorer-untracked-'))
+    const agents = join(root, 'agents')
+    const scanned = join(agents, 'skills', 'untracked-skill')
+    mkdirSync(scanned, { recursive: true })
+    writeFileSync(join(scanned, 'SKILL.md'), '---\nname: untracked-skill\ndescription: 普通技能\n---\n', 'utf8')
+    const store = new CentralSkillStore(':memory:', true)
+    const isolatedRoutes = makeRoutes(emptyCtx, {
+      ...deps,
+      agentsHome: agents,
+      centralSkillsDir: join(root, 'central'),
+      centralStore: store,
+    })
+    try {
+      // When it is deleted
+      const { res, status, body } = response()
+      await isolatedRoutes.find(route => route.path === ROUTES.delete)!.handler(
+        request(ROUTES.delete, 'POST', { body: { name: 'untracked-skill', path: join(scanned, 'SKILL.md') } }),
+        res,
+      )
+
+      // Then it is trashed normally and the store is left alone
+      expect(status()).toBe(200)
+      expect(existsSync(scanned)).toBe(false)
+      expect(JSON.parse(body()).removedCentral).toEqual({ targets: [] })
+      expect(store.getAllSkills()).toEqual([])
+    } finally {
+      store.close()
+      rmSync(root, { recursive: true, force: true })
     }
   })
 })
@@ -755,6 +936,64 @@ describe('registry degradation', () => {
   })
 })
 
+describe('workspace inventory (deleted workspaces must not return)', () => {
+  it('user who deleted a workspace does not see it re-appear from a retained session cwd', async () => {
+    // Given: a workspace the registry no longer knows (it was deleted), while a
+    // retained session log under "Ungrouped" still carries that directory as
+    // its cwd. DSH deletes only the registration and keeps the folder and the
+    // session log, so a session cwd is not evidence of a live workspace.
+    const deletedProj = join(TMP, 'deleted-proj')
+    mkdirSync(join(deletedProj, '.git'), { recursive: true })
+
+    const customDeps = {
+      ...deps,
+      // The live session is in PROJ; the deleted workspace survives only as the
+      // cwd of a retained session log that DSH moved to "Ungrouped".
+      activeSessionCwds: () => [PROJ, deletedProj],
+      registeredWorkspaces: () => [{ root: PROJ, name: 'proj' }],
+    }
+    const customRoutes = makeRoutes(emptyCtx, customDeps)
+
+    // When: the panel lists skills
+    const captured = response()
+    await customRoutes.find((r) => r.path === ROUTES.list)!.handler(request(ROUTES.list, 'GET'), captured.res)
+
+    // Then: the deleted workspace is not offered as a workspace
+    expect(captured.status()).toBe(200)
+    const payload = JSON.parse(captured.body())
+    const wsRoots = payload.workspaces.map((w: { root: string }) => w.root)
+    expect(wsRoots).not.toContain(deletedProj)
+    expect(wsRoots).toContain(PROJ)
+    // And it is not scanned as a project root either
+    expect(payload.projectRoots).not.toContain(deletedProj)
+  })
+
+  it('user whose host has no workspace registry still sees the active session workspace', async () => {
+    // Given: a composition without a workspaceRegistry service, so the
+    // registered list degrades to empty. The active session is then the only
+    // evidence of a workspace and must still be honored (a headless run).
+    const sessionProj = join(TMP, 'session-only-proj')
+    mkdirSync(join(sessionProj, '.git'), { recursive: true })
+    const customDeps = {
+      ...deps,
+      activeSessionCwds: () => [sessionProj],
+      registeredWorkspaces: () => [],
+    }
+    const customRoutes = makeRoutes(emptyCtx, customDeps)
+
+    // When: the panel lists skills
+    const captured = response()
+    await customRoutes.find((r) => r.path === ROUTES.list)!.handler(request(ROUTES.list, 'GET'), captured.res)
+
+    // Then: the session workspace is still listed and scanned
+    expect(captured.status()).toBe(200)
+    const payload = JSON.parse(captured.body())
+    const wsRoots = payload.workspaces.map((w: { root: string }) => w.root)
+    expect(wsRoots).toContain(sessionProj)
+    expect(payload.projectRoots).toContain(sessionProj)
+  })
+})
+
 /** One set-enabled request with a raw (possibly malformed) body, plus its destroy spy. */
 function rawSetEnabledRequest(rawBody: string): { req: IncomingMessage; destroy: ReturnType<typeof vi.fn> } {
   const destroy = vi.fn()
@@ -1102,21 +1341,25 @@ describe('import (#1881)', () => {
   function importFixture(): {
     root: string
     home: string
+    agents: string
     project: string
     mount(): ReturnType<typeof makeRoutes>
   } {
     const root = mkdtempSync(join(tmpdir(), 'skill-explorer-import-route-'))
     const project = join(root, 'project')
     const home = join(root, 'home')
+    const agents = join(root, 'agents')
     mkdirSync(join(project, '.git'), { recursive: true })
     mkdirSync(home, { recursive: true })
+    mkdirSync(agents, { recursive: true })
     return {
       root,
       home,
+      agents,
       project,
       mount: () => makeRoutes({} as never, {
         dshHome: home,
-        agentsHome: join(root, 'agents'),
+        agentsHome: agents,
         customSkillDirs: [],
         registry: { snapshot: async () => ({ skills: [], complete: true }) },
         activeSessionCwds: () => [project],
@@ -1156,11 +1399,11 @@ describe('import (#1881)', () => {
         cwd: fixture.project,
         source: { kind: 'directory', path: source },
       })
-      // Then the file lands under ~/.dsh/skills and the report counts it
+      // Then the file lands under ~/.agents/skills and the report counts it
       expect(result.status).toBe(200)
       expect(result.payload.imported).toBe(1)
       expect(result.payload.skipped).toBe(0)
-      expect(existsSync(join(fixture.home, 'skills', 'alpha-skill', 'SKILL.md'))).toBe(true)
+      expect(existsSync(join(fixture.agents, 'skills', 'alpha-skill', 'SKILL.md'))).toBe(true)
     } finally {
       rmSync(fixture.root, { recursive: true, force: true })
     }
@@ -1226,8 +1469,8 @@ describe('import (#1881)', () => {
       // Then both land under the user root
       expect(result.status).toBe(200)
       expect(result.payload.imported).toBe(2)
-      expect(existsSync(join(fixture.home, 'skills', 'alpha-skill', 'SKILL.md'))).toBe(true)
-      expect(existsSync(join(fixture.home, 'skills', 'beta-skill', 'SKILL.md'))).toBe(true)
+      expect(existsSync(join(fixture.agents, 'skills', 'alpha-skill', 'SKILL.md'))).toBe(true)
+      expect(existsSync(join(fixture.agents, 'skills', 'beta-skill', 'SKILL.md'))).toBe(true)
     } finally {
       rmSync(fixture.root, { recursive: true, force: true })
     }

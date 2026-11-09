@@ -14,6 +14,9 @@ export default defineConfig({
   },
   test: {
     include: ['tests/**/*.spec.{ts,tsx}'],
+    // Git-backed suites spawn the `git` binary dozens of times; a few seconds
+    // each on Windows, so the 5s default fails them under parallel load.
+    testTimeout: 20_000,
     pool: 'forks',
     environment: 'jsdom',
     setupFiles: ['./vitest.setup.ts'],

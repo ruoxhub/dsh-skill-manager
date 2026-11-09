@@ -36,13 +36,6 @@ export const DEFAULT_EXPANDED_LEVELS: readonly string[] = [
 /** Per-group collapse decisions: true while a group is collapsed. */
 export type CollapseState = Readonly<Record<string, boolean>>
 
-/** A named snapshot of enabled skills for one-click switching. */
-export interface SkillPreset {
-  id: string
-  name: string
-  enabledSkills: string[]
-}
-
 /** The persisted list-view preferences. */
 export interface ListViewPrefs {
   /** Source group keys the user narrowed to; empty means every group. */
@@ -53,8 +46,6 @@ export interface ListViewPrefs {
   marks: SkillMark[]
   /** Per-group collapse decisions, keyed by source group key. */
   collapsed: CollapseState
-  /** Named skill activation presets. */
-  presets?: SkillPreset[]
 }
 
 /** The storage surface this module needs (localStorage satisfies it). */
@@ -103,26 +94,6 @@ function collapseMap(value: unknown): CollapseState {
   return out
 }
 
-const MAX_PRESETS = 16
-
-/** Read the presets list, keeping valid objects only. */
-function parsePresets(value: unknown): SkillPreset[] {
-  if (!Array.isArray(value)) return []
-  const out: SkillPreset[] = []
-  const seenIds = new Set<string>()
-  for (const entry of value) {
-    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
-    const e = entry as Record<string, unknown>
-    if (typeof e.id !== 'string' || e.id === '' || seenIds.has(e.id)) continue
-    if (typeof e.name !== 'string' || e.name === '') continue
-    seenIds.add(e.id)
-    const enabledSkills = stringList(e.enabledSkills)
-    out.push({ id: e.id, name: e.name, enabledSkills })
-    if (out.length >= MAX_PRESETS) break
-  }
-  return out
-}
-
 /**
  * Read the stored preferences, falling back to the defaults for a missing,
  * unreadable, oversized or malformed document. Every field is validated on its
@@ -157,34 +128,7 @@ export function loadListPrefs(storage: StorageLike | undefined): ListViewPrefs {
     marks: stringList(document.marks, MARKS) as SkillMark[],
     collapsed: collapseMap(document.collapsed),
   }
-  if (document.presets !== undefined) {
-    result.presets = parsePresets(document.presets)
-  }
   return result
-}
-
-/** Add a new preset snapshot to preferences. */
-export function savePreset(current: ListViewPrefs, name: string, enabledSkills: string[]): ListViewPrefs {
-  const existing = current.presets ?? []
-  if (existing.length >= MAX_PRESETS) {
-    return current
-  }
-  const id = `preset-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
-  const boundedSkills = stringList(enabledSkills)
-  const newPreset: SkillPreset = { id, name: name.trim().slice(0, 40), enabledSkills: boundedSkills }
-  return {
-    ...current,
-    presets: [...existing, newPreset],
-  }
-}
-
-/** Delete a preset by id. */
-export function deletePreset(current: ListViewPrefs, presetId: string): ListViewPrefs {
-  const existing = current.presets ?? []
-  return {
-    ...current,
-    presets: existing.filter(p => p.id !== presetId),
-  }
 }
 
 /**

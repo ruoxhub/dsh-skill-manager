@@ -1,6 +1,8 @@
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { inflateRawSync } from 'node:zlib'
+import { discardPrevious, stagedPathFor, swapSkillDir } from '../atomic.ts'
+import { hashSkillDir } from '../content-hash.ts'
 import { DEFAULT_CONFIG, fetchOpts, parseSlug } from './client.ts'
 import type { FetchOptions, SkillHubConfig } from './types.ts'
 
@@ -14,6 +16,8 @@ export interface MarketInstallResult {
   version: string
   path: string
   files: number
+  /** Content hash of the installed tree, so an update can tell it apart. */
+  contentHash: string | null
 }
 
 export interface InstallMarketOptions {
@@ -162,16 +166,25 @@ export async function installMarketSkill(slug: string, options: InstallMarketOpt
   const skillName = nameMatch ? nameMatch[1].trim() : id
 
   const targetDir = resolveSkillTargetDir(options.targetRoot, id)
-  await mkdir(targetDir, { recursive: true })
-
+  // Stage beside the target and swap in one rename: an interrupted install
+  // must not leave a half-written skill where a working one used to be.
+  const stagedDir = stagedPathFor(targetDir)
+  await rm(stagedDir, { recursive: true, force: true })
   let fileCount = 0
-  for (const [relPath, content] of Object.entries(cleanFiles)) {
-    if (!relPath || relPath.endsWith('/')) continue
-    const fullPath = join(targetDir, relPath)
-    await mkdir(dirname(fullPath), { recursive: true })
-    await writeFile(fullPath, content)
-    fileCount++
+  try {
+    await mkdir(stagedDir, { recursive: true })
+    for (const [relPath, content] of Object.entries(cleanFiles)) {
+      if (!relPath || relPath.endsWith('/')) continue
+      const fullPath = join(stagedDir, relPath)
+      await mkdir(dirname(fullPath), { recursive: true })
+      await writeFile(fullPath, content)
+      fileCount++
+    }
+  } catch (error) {
+    await rm(stagedDir, { recursive: true, force: true })
+    throw error
   }
+  discardPrevious(swapSkillDir(stagedDir, targetDir))
 
   return {
     slug: id,
@@ -179,5 +192,6 @@ export async function installMarketSkill(slug: string, options: InstallMarketOpt
     version: ver || 'latest',
     path: targetDir,
     files: fileCount,
+    contentHash: hashSkillDir(targetDir),
   }
 }

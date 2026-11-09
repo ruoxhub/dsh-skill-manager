@@ -1,8 +1,17 @@
-import { useEffect, useRef, useState } from 'react'
+/**
+ * Market skill detail modal: the centered card opened from a market card.
+ *
+ * Same chrome as the installed-skill detail (detail-modal.tsx): icon, title,
+ * summary, section bar and one scrolling body. The market-specific parts are
+ * the version / verified badges, the install destination picker, and the
+ * README / TRACE evaluation / version-history sections.
+ */
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { SkillApi, WorkspaceItem } from '../api.ts'
 import { tt } from '../panel-helpers.ts'
 import type { MarketSkillDetail, SkillCard } from '../../skillhub/types.ts'
 import { TRACE_DIMS } from '../../skillhub/client.ts'
+import { DetailModal, DocBody } from './detail-modal.tsx'
 import css from './panel.module.css'
 
 export interface MarketDetailDrawerProps {
@@ -30,9 +39,13 @@ export function MarketDetailDrawer({
   const [activeTab, setActiveTab] = useState<DrawerSubTab>('readme')
   const [workspaces, setWorkspaces] = useState<WorkspaceItem[]>(initialWorkspaces ?? [])
   const [targetDestination, setTargetDestination] = useState<string>('user')
+  const [query, setQuery] = useState('')
   const [error, setError] = useState<string | undefined>(undefined)
+  const [installError, setInstallError] = useState<string | undefined>(undefined)
+  // Sync guard: a double click before the re-render would install twice.
+  const installingRef = useRef(false)
 
-  const closeBtnRef = useRef<HTMLButtonElement>(null)
+  const slug = skill?.slug
 
   // Fetch workspaces if not provided
   useEffect(() => {
@@ -50,39 +63,23 @@ export function MarketDetailDrawer({
     return () => { unmounted = true }
   }, [api, initialWorkspaces])
 
-  // Listen for Escape key to close the drawer.
+  // Fetch full detail when a skill opens
   useEffect(() => {
-    if (!skill) return
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !e.defaultPrevented) {
-        e.preventDefault()
-        onClose()
-      }
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => { window.removeEventListener('keydown', handleKeyDown) }
-  }, [skill, onClose])
-
-  // Focus close button on open
-  useEffect(() => {
-    if (skill) {
-      closeBtnRef.current?.focus()
-    }
-  }, [skill])
-
-  // Fetch full detail when skill opens
-  useEffect(() => {
-    if (!skill) {
+    setQuery('')
+    setActiveTab('readme')
+    if (!slug) {
       setDetail(null)
       setError(undefined)
+      setInstallError(undefined)
       return
     }
 
     let cancelled = false
     setLoading(true)
     setError(undefined)
+    setInstallError(undefined)
 
-    void api.getMarketDetail(skill.slug)
+    void api.getMarketDetail(slug)
       .then((res: MarketSkillDetail) => {
         if (!cancelled) {
           setDetail(res)
@@ -97,238 +94,182 @@ export function MarketDetailDrawer({
       })
 
     return () => { cancelled = true }
-  }, [skill, api])
+  }, [slug, api])
+
+  const evaluation = detail?.evaluation
+  const versions = useMemo(() => detail?.versions ?? [], [detail])
+  const readmeContent = detail?.readme || skill?.description || tt('market.noDesc')
 
   if (!skill) return null
 
-  const handleInstall = async () => {
-    if (installing || installed) return
+  const handleInstall = async (): Promise<void> => {
+    if (installingRef.current || installed) return
+    installingRef.current = true
     setInstalling(true)
+    setInstallError(undefined)
     try {
-      if (targetDestination === 'user') {
-        await api.installMarket({
-          slug: skill.slug,
-          version: skill.version || undefined,
-          root: 'user',
-        })
-      } else if (targetDestination === 'project') {
-        await api.installMarket({
-          slug: skill.slug,
-          version: skill.version || undefined,
-          root: 'project',
-        })
-      } else {
-        await api.installMarket({
-          slug: skill.slug,
-          version: skill.version || undefined,
-          root: 'project',
-          cwd: targetDestination,
-        })
-      }
+      const base = { slug: skill.slug, version: skill.version || undefined }
+      if (targetDestination === 'user') await api.installMarket({ ...base, root: 'user' })
+      else if (targetDestination === 'project') await api.installMarket({ ...base, root: 'project' })
+      else await api.installMarket({ ...base, root: 'project', cwd: targetDestination })
       onInstalled?.(skill.slug)
     } catch (err) {
-      alert(tt('market.installFailed', { error: err instanceof Error ? err.message : String(err) }))
+      setInstallError(tt('market.installFailed', { error: err instanceof Error ? err.message : String(err) }))
     } finally {
+      installingRef.current = false
       setInstalling(false)
     }
   }
 
-  const evaluation = detail?.evaluation
-  const versions = detail?.versions || []
-  const readmeContent = detail?.readme || skill.description || '暂无详细说明'
+  const subinfo: string[] = []
+  if (skill.owner !== undefined) subinfo.push(tt('market.authorPrefix', { author: skill.owner }))
+  if (skill.categoryLabel !== undefined) subinfo.push(tt('market.categoryPrefix', { category: skill.categoryLabel }))
+  subinfo.push(tt('market.downloadsPrefix', { downloads: skill.downloads || 0 }))
+  subinfo.push(tt('market.starsPrefix', { stars: skill.stars || 0 }))
+
+  const tabs: ReadonlyArray<{ id: DrawerSubTab; label: string }> = [
+    { id: 'readme', label: tt('market.tabReadme') },
+    { id: 'trace', label: evaluation?.score ? `${tt('market.tabTrace')} (${evaluation.score})` : tt('market.tabTrace') },
+    { id: 'versions', label: `${tt('market.tabVersions')} (${versions.length})` },
+  ]
 
   return (
-    <>
-      <div className={css.drawerBackdrop} onClick={onClose} aria-hidden="true" />
-      <aside
-        className={css.marketDrawerContainer}
-        role="dialog"
-        aria-modal="true"
-        aria-label={skill.name}
-        data-dsh-part="market-drawer"
-      >
-        {/* Drawer Header */}
-        <div className={css.marketDrawerHeader}>
-          <div className={css.marketDrawerHeaderLeft}>
-            {skill.iconUrl ? (
-              <img src={skill.iconUrl} alt="" className={css.marketDrawerIcon} />
-            ) : (
-              <div className={css.marketDrawerAvatarFallback}>
-                {(skill.name || skill.slug).charAt(0).toUpperCase()}
+    <DetailModal
+      label={skill.name || skill.slug}
+      dataPart="market-dialog"
+      icon={skill.iconUrl !== undefined && skill.iconUrl !== ''
+        ? <img src={skill.iconUrl} alt="" className={css.modalIconImage} />
+        : (
+          <div className={css.modalLetterTile} aria-hidden="true">
+            {(skill.name || skill.slug).charAt(0).toUpperCase()}
+          </div>
+        )}
+      title={(
+        <>
+          <span className={css.modalTitleText}>{skill.name || skill.slug}</span>
+          {skill.verified === true && (
+            <span className={css.marketVerifiedBadge} title={tt('market.verifiedAuthor')}>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+            </span>
+          )}
+          {skill.version !== undefined && skill.version !== '' && (
+            <span className={css.marketVersionBadge}>v{skill.version}</span>
+          )}
+        </>
+      )}
+      meta={subinfo.map((fact, index) => <span key={`${fact}:${index}`} className={css.modalFact}>{fact}</span>)}
+      actions={(
+        <>
+          <select
+            className={css.modalSelect}
+            value={targetDestination}
+            aria-label={tt('market.targetRoot')}
+            onChange={e => setTargetDestination(e.target.value)}
+          >
+            <option value="user">{tt('market.targetUser')}</option>
+            {workspaces.length > 0
+              ? workspaces.map(ws => (
+                <option key={ws.root} value={ws.root}>
+                  {ws.active ? tt('filter.workspaceCurrent', { name: ws.name }) : ws.name}
+                </option>
+              ))
+              : <option value="project">{tt('market.targetProject')}</option>}
+          </select>
+          <button
+            type="button"
+            data-dsh-action="drawer-install"
+            className={`${css.modalPrimary}${installed ? ` ${css.installedBtn}` : ''}`}
+            disabled={installing || installed}
+            onClick={() => { void handleInstall() }}
+          >
+            {installed ? tt('market.installed') : installing ? tt('market.installing') : tt('market.install')}
+          </button>
+        </>
+      )}
+      description={skill.description}
+      bar={(
+        <div className={css.modalTabs} role="tablist">
+          {tabs.map(tab => (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab.id}
+              className={css.modalTab}
+              data-active={activeTab === tab.id ? '' : undefined}
+              onClick={() => { setActiveTab(tab.id) }}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      )}
+      search={activeTab === 'readme' && !loading
+        ? { value: query, onChange: setQuery, placeholder: tt('detail.searchPlaceholder') }
+        : undefined}
+      onClose={onClose}
+    >
+      {installError !== undefined && <p className={css.banner} data-kind="error">{installError}</p>}
+      {loading ? (
+        <p className={css.empty}>{tt('list.loading')}</p>
+      ) : error !== undefined ? (
+        <p className={css.banner} data-kind="error">{error}</p>
+      ) : activeTab === 'readme' ? (
+        <DocBody
+          content={readmeContent}
+          query={query}
+          emptyText={tt('detail.searchEmpty', { query: query.trim() })}
+        />
+      ) : activeTab === 'trace' ? (
+        evaluation ? (
+          <div className={css.modalTabBody}>
+            <div className={css.traceHero}>
+              <div className={css.traceScoreCircle}>
+                <span className={css.traceScoreValue}>{evaluation.score ?? '-'}</span>
+                <span className={css.traceScoreMax}>/ 5.0</span>
               </div>
-            )}
-            <div className={css.marketDrawerTitleInfo}>
-              <div className={css.marketDrawerTitleRow}>
-                <h2 className={css.marketDrawerTitle}>{skill.name || skill.slug}</h2>
-                {skill.verified && (
-                  <span className={css.marketVerifiedBadge} title="认证作者">✓</span>
-                )}
-                {skill.version && (
-                  <span className={css.marketVersionBadge}>v{skill.version}</span>
-                )}
-              </div>
-              <div className={css.marketDrawerSubinfo}>
-                {skill.owner && <span>作者: {skill.owner}</span>}
-                {skill.categoryLabel && <span>分类: {skill.categoryLabel}</span>}
-                <span>下载: {skill.downloads || 0}</span>
-                <span>收藏: {skill.stars || 0}</span>
+              <div className={css.traceSummaryWrapper}>
+                <h3 className={css.traceHeroTitle}>{tt('market.traceReport')}</h3>
+                <p className={css.traceHeroSummary}>{evaluation.userSummary || tt('market.traceDefaultSummary')}</p>
               </div>
             </div>
+
+            <div className={css.traceDimensionsGrid}>
+              {TRACE_DIMS.map(dim => {
+                const entry = evaluation.dimensions[dim.key]
+                return (
+                  <div key={dim.key} className={css.traceDimCard}>
+                    <div className={css.traceDimHeader}>
+                      <span className={css.traceDimBadge}>{dim.letter}</span>
+                      <span className={css.traceDimName}>{dim.name}</span>
+                      <span className={css.traceDimScore}>{entry?.score ?? '-'}</span>
+                    </div>
+                    <p className={css.traceDimReason}>{entry?.userReason || tt('market.traceNoReason')}</p>
+                  </div>
+                )
+              })}
+            </div>
           </div>
-
-          <div className={css.marketDrawerHeaderActions}>
-            <select
-              className={css.select}
-              value={targetDestination}
-              aria-label={tt('market.targetRoot')}
-              onChange={e => setTargetDestination(e.target.value)}
-            >
-              <option value="user">{tt('market.targetUser')}</option>
-              {workspaces.length > 0 ? (
-                workspaces.map(ws => (
-                  <option key={ws.root} value={ws.root}>
-                    {ws.active ? tt('filter.workspaceCurrent', { name: ws.name }) : ws.name}
-                  </option>
-                ))
-              ) : (
-                <option value="project">{tt('market.targetProject')}</option>
-              )}
-            </select>
-
-            <button
-              type="button"
-              data-dsh-action="drawer-install"
-              className={`${css.filledBtn}${installed ? ` ${css.installedBtn}` : ''}`}
-              disabled={installing || installed}
-              onClick={() => { void handleInstall() }}
-            >
-              {installed
-                ? tt('market.installed')
-                : installing
-                  ? tt('market.installing')
-                  : tt('market.install')}
-            </button>
-
-            <button
-              ref={closeBtnRef}
-              type="button"
-              className={css.iconActionBtn}
-              aria-label={tt('detail.close')}
-              title={tt('detail.closeTooltip')}
-              onClick={onClose}
-              data-close=""
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <line x1="18" y1="6" x2="6" y2="18" />
-                <line x1="6" y1="6" x2="18" y2="18" />
-              </svg>
-            </button>
-          </div>
-        </div>
-
-        {/* Drawer Subtab Navigation */}
-        <div className={css.marketDrawerTabs} role="tablist">
-          <button
-            type="button"
-            className={`${css.marketDrawerTabBtn}${activeTab === 'readme' ? ` ${css.activeDrawerTab}` : ''}`}
-            onClick={() => setActiveTab('readme')}
-          >
-            文档说明
-          </button>
-          <button
-            type="button"
-            className={`${css.marketDrawerTabBtn}${activeTab === 'trace' ? ` ${css.activeDrawerTab}` : ''}`}
-            onClick={() => setActiveTab('trace')}
-          >
-            TRACE 质量评测 {evaluation?.score ? `(${evaluation.score})` : ''}
-          </button>
-          <button
-            type="button"
-            className={`${css.marketDrawerTabBtn}${activeTab === 'versions' ? ` ${css.activeDrawerTab}` : ''}`}
-            onClick={() => setActiveTab('versions')}
-          >
-            版本记录 ({versions.length})
-          </button>
-        </div>
-
-        {/* Drawer Body */}
-        <div className={css.marketDrawerBody}>
-          {loading ? (
-            <p className={css.empty}>{tt('list.loading')}</p>
-          ) : error ? (
-            <p className={css.banner} data-kind="error">{error}</p>
-          ) : (
-            <>
-              {activeTab === 'readme' && (
-                <div className={css.marketDrawerReadme}>
-                  <pre className={css.drawerContentPre}>{readmeContent}</pre>
-                </div>
-              )}
-
-              {activeTab === 'trace' && (
-                <div className={css.marketDrawerTrace}>
-                  {evaluation ? (
-                    <>
-                      <div className={css.traceHero}>
-                        <div className={css.traceScoreCircle}>
-                          <span className={css.traceScoreValue}>{evaluation.score ?? '-'}</span>
-                          <span className={css.traceScoreMax}>/ 5.0</span>
-                        </div>
-                        <div className={css.traceSummaryWrapper}>
-                          <h3 className={css.traceHeroTitle}>TRACE 质量评估报告</h3>
-                          <p className={css.traceHeroSummary}>{evaluation.userSummary || '整体质量良好'}</p>
-                        </div>
-                      </div>
-
-                      <div className={css.traceDimensionsGrid}>
-                        {TRACE_DIMS.map(d => {
-                          const dim = evaluation.dimensions[d.key]
-                          return (
-                            <div key={d.key} className={css.traceDimCard}>
-                              <div className={css.traceDimHeader}>
-                                <span className={css.traceDimBadge}>{d.letter}</span>
-                                <span className={css.traceDimName}>{d.name}</span>
-                                <span className={css.traceDimScore}>{dim?.score ?? '-'}</span>
-                              </div>
-                              <p className={css.traceDimReason}>{dim?.userReason || '未提供具体评估说明'}</p>
-                            </div>
-                          )
-                        })}
-                      </div>
-                    </>
-                  ) : (
-                    <p className={css.empty}>该技能暂无 TRACE 评测数据</p>
-                  )}
-                </div>
-              )}
-
-              {activeTab === 'versions' && (
-                <div className={css.marketDrawerVersions}>
-                  {versions.length === 0 ? (
-                    <p className={css.empty}>暂无版本记录</p>
-                  ) : (
-                    <ul className={css.versionList}>
-                      {versions.map(v => (
-                        <li key={v.version} className={css.versionItem}>
-                          <div className={css.versionHeader}>
-                            <span className={css.versionTag}>v{v.version}</span>
-                            {v.createdAt ? (
-                              <span className={css.versionDate}>
-                                {new Date(v.createdAt).toLocaleDateString()}
-                              </span>
-                            ) : null}
-                          </div>
-                          {v.changelog && <p className={css.versionChangelog}>{v.changelog}</p>}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      </aside>
-    </>
+        ) : <p className={css.empty}>{tt('market.traceEmpty')}</p>
+      ) : versions.length === 0 ? (
+        <p className={css.empty}>{tt('market.versionsEmpty')}</p>
+      ) : (
+        <ul className={css.versionList}>
+          {versions.map(version => (
+            <li key={version.version} className={css.versionItem}>
+              <div className={css.versionHeader}>
+                <span className={css.versionTag}>v{version.version}</span>
+                {version.createdAt ? (
+                  <span className={css.versionDate}>{new Date(version.createdAt).toLocaleDateString()}</span>
+                ) : null}
+              </div>
+              {version.changelog !== undefined && <p className={css.versionChangelog}>{version.changelog}</p>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </DetailModal>
   )
 }

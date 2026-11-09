@@ -10,20 +10,29 @@
  * this page whenever another panel takes the center column.
  */
 import { useEffect, useRef, useState } from 'react'
-import { SkillApi, type GroupPayload, type ListPayload, type SkillEntry } from '../api.ts'
+import { SkillApi, type GroupPayload, type ListPayload, type PresetListPayload, type SkillEntry, type SkillPresetRecord, type SkillRootKey } from '../api.ts'
 import { zh } from '../locales.ts'
 import { tt } from '../panel-helpers.ts'
 import {
   loadListPrefs,
   saveListPrefs,
-  savePreset,
-  deletePreset,
-  type SkillPreset,
   type ListViewPrefs,
   type StorageLike,
 } from '../panel-prefs.ts'
 import { selectGroups, type SkillListFilter, type SkillMark, type SkillStatus } from '../skill-filter.ts'
+import {
+  canToggle,
+  duplicateSkillName,
+  getAvatarLetter,
+  getAvatarPalette,
+  invokableMarks,
+  localFileBadge,
+  localFileHint,
+  providerLabel,
+  skillDirPath,
+} from './skill-present.ts'
 import type { SkillDraft } from './controller.ts'
+import { CommandPalette } from './CommandPalette.tsx'
 import { DetailDrawer } from './DetailDrawer.tsx'
 import css from './panel.module.css'
 
@@ -32,12 +41,6 @@ const MARK_FACETS: readonly SkillMark[] = ['provider-file', 'no-file', 'linked']
 
 /** The enabled/disabled facets, in the order the filter bar lists them. */
 const STATUS_FACETS: readonly SkillStatus[] = ['all', 'enabled', 'disabled']
-
-/** Localized provider label with fallback to the raw provider id. */
-function providerLabel(provider: string): string {
-  const key = `provider.${provider}` as keyof typeof zh
-  return key in zh ? tt(key) : provider
-}
 
 /** Localized source-group title, falling back to the host's own copy. */
 function groupTitle(group: GroupPayload): string {
@@ -71,83 +74,6 @@ function activeFacetCount(prefs: ListViewPrefs): number {
   return prefs.levels.length + (prefs.status === 'all' ? 0 : 1) + prefs.marks.length
 }
 
-/** The name a duplicate starts from; the user can change it before creating. */
-function duplicateSkillName(name: string): string {
-  return `${name}-copy`
-}
-
-/**
- * Whether this row carries an enable switch.
- *
- * A row with a writable path switches by rewriting its own SKILL.md
- * frontmatter. A plugin-provided file (issue #1854) has no such path, so its
- * switch is recorded in the panel's own store; a truly fileless registration
- * has nothing to switch and still shows none.
- * @param skill - the row's entry.
- * @returns whether the row offers the switch.
- */
-function canToggle(skill: SkillEntry): boolean {
-  return skill.path !== undefined || skill.fileState === 'provider-file'
-}
-
-/**
- * The local-file badge for a row that the write routes cannot serve.
- *
- * A skill with a plugin-supplied file and a skill with no file at all are
- * different facts (issue #1842): the first is "Provided by plugin", only the
- * second is "No local file". Both are pathless, so neither offers file
- * controls.
- * @param skill - the row's entry.
- * @returns the badge copy and its tooltip.
- */
-function localFileBadge(skill: SkillEntry): { label: string; tooltip: string } {
-  return skill.fileState === 'provider-file'
-    ? { label: tt('list.providerFile'), tooltip: tt('list.providerFileTooltip') }
-    : { label: tt('list.noFile'), tooltip: tt('list.noFileTooltip') }
-}
-
-/** The explanation shown under a row the write routes cannot serve. */
-function localFileHint(skill: SkillEntry): string {
-  return skill.fileState === 'provider-file' ? tt('list.providerFileHint') : tt('list.noFileHint')
-}
-
-/** Marks shown next to a skill (model/user invocable). */
-function invokableMarks(skill: SkillEntry): string {
-  const marks: string[] = []
-  if (skill.modelInvocable) marks.push(tt('list.mark.model'))
-  if (skill.userInvocable) marks.push(tt('list.mark.user'))
-  return marks.join(' / ')
-}
-
-/** Deterministic pastel avatar palettes matching the visual design. */
-const AVATAR_PALETTES = [
-  { bg: '#FEF3C7', color: '#D97706' }, // amber/yellow
-  { bg: '#DBEAFE', color: '#2563EB' }, // blue
-  { bg: '#FCE7F3', color: '#E11D48' }, // pink/rose
-  { bg: '#DCFCE7', color: '#16A34A' }, // green/emerald
-  { bg: '#ECFCCB', color: '#65A30D' }, // lime
-  { bg: '#F3E8FF', color: '#9333EA' }, // purple/violet
-  { bg: '#FFEDD5', color: '#EA580C' }, // orange
-  { bg: '#FEE2E2', color: '#DC2626' }, // red/coral
-  { bg: '#E0E7FF', color: '#4F46E5' }, // indigo
-  { bg: '#CCFBF1', color: '#0D9488' }, // teal
-  { bg: '#E0F2FE', color: '#0284C7' }, // sky
-] as const
-
-function getAvatarPalette(name: string): { bg: string; color: string } {
-  let hash = 0
-  for (let i = 0; i < name.length; i++) {
-    hash = ((hash << 5) - hash) + name.charCodeAt(i)
-    hash |= 0
-  }
-  return AVATAR_PALETTES[Math.abs(hash) % AVATAR_PALETTES.length]!
-}
-
-function getAvatarLetter(name: string): string {
-  const match = name.match(/[a-zA-Z0-9]/)
-  return match ? match[0].toUpperCase() : 'S'
-}
-
 /** One skill card: avatar, name, badges, enable switch, pin, edit, duplicate and delete actions. */
 function SkillRow({ skill, api, onChanged, onEdit, onDuplicate, isPinned, onTogglePin, batchMode, isSelected, onToggleSelect, onSelectDetail }: {
   skill: SkillEntry
@@ -163,7 +89,9 @@ function SkillRow({ skill, api, onChanged, onEdit, onDuplicate, isPinned, onTogg
   onSelectDetail?: (skill: SkillEntry) => void
 }): React.JSX.Element {
   const [busy, setBusy] = useState(false)
+  const [updating, setUpdating] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
+  const [notice, setNotice] = useState<string | undefined>(undefined)
   const [menuOpen, setMenuOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
   // Sync ref guard: React state updates are async, so a double click before
@@ -177,8 +105,17 @@ function SkillRow({ skill, api, onChanged, onEdit, onDuplicate, isPinned, onTogg
         setMenuOpen(false)
       }
     }
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setMenuOpen(false)
+      }
+    }
     document.addEventListener('mousedown', handleClickOutside)
-    return () => { document.removeEventListener('mousedown', handleClickOutside) }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
   }, [menuOpen])
 
   const toggle = async (): Promise<void> => {
@@ -221,6 +158,24 @@ function SkillRow({ skill, api, onChanged, onEdit, onDuplicate, isPinned, onTogg
   }
 
   /**
+   * Copy the skill's folder path, the unit the user pastes into a terminal or
+   * an editor. A lone `<name>.md` skill has no folder of its own, so its own
+   * path is the closest thing.
+   */
+  const copyPath = async (): Promise<void> => {
+    const path = skill.path
+    if (path === undefined) return
+    setNotice(undefined)
+    try {
+      await navigator.clipboard.writeText(skillDirPath(path))
+      setNotice(tt('list.copyPathDone'))
+    } catch {
+      // A rejected clipboard permission must not look like a successful copy.
+      setError(tt('list.copyPathFailed'))
+    }
+  }
+
+  /**
    * Copy this skill's fields into the create form as a starting point. The
    * read route resolves the row's own path through a fresh scan, so the draft
    * can only ever come from a skill the panel is showing.
@@ -244,6 +199,36 @@ function SkillRow({ skill, api, onChanged, onEdit, onDuplicate, isPinned, onTogg
       setError(tt('list.duplicateFailed', { error: err instanceof Error ? err.message : String(err) }))
     } finally {
       busyRef.current = false
+      setBusy(false)
+    }
+  }
+
+  const handleUpdateOne = async (e: React.MouseEvent): Promise<void> => {
+    e.stopPropagation()
+    if (updating) return
+    setUpdating(true)
+    setError(undefined)
+    try {
+      await api.updateOne(skill.name)
+      onChanged()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setUpdating(false)
+    }
+  }
+
+  const handleCheckOne = async (e: React.MouseEvent): Promise<void> => {
+    e.stopPropagation()
+    if (busy) return
+    setBusy(true)
+    setError(undefined)
+    try {
+      await api.checkOne(skill.name)
+      onChanged()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
       setBusy(false)
     }
   }
@@ -295,7 +280,7 @@ function SkillRow({ skill, api, onChanged, onEdit, onDuplicate, isPinned, onTogg
 
   return (
     <article
-      className={`${css.skillRow}${isIsolated ? ` ${css.skillIsolated}` : ''}`}
+      className={`${css.skillRow}${isIsolated ? ` ${css.skillIsolated}` : ''}${menuOpen ? ` ${css.cardMenuOpen}` : ''}`}
       title={tooltip}
       data-dsh-part="skill-row"
       role="button"
@@ -322,102 +307,162 @@ function SkillRow({ skill, api, onChanged, onEdit, onDuplicate, isPinned, onTogg
       <div className={css.cardBody}>
         <div className={css.cardHeader}>
           <span className={css.skillName} title={skill.name}>{skill.name}</span>
-          <div className={css.badgeContainer}>
-            {skill.workspaceName !== undefined && (
-              <span className={`${css.badge} ${css.badgeWorkspace}`}>{skill.workspaceName}</span>
-            )}
-            {isIsolated && (
-              <span className={`${css.badge} ${css.badgeIsolated}`} title={tt('workspace.isolatedHint', { workspace: skill.workspaceName ?? '' })}>
-                {tt('workspace.isolated')}
-              </span>
-            )}
-            {skill.provider !== undefined && (
-              <span className={css.badge} title={tt('provider.tooltip', { provider: providerLabel(skill.provider) })}>
-                {providerLabel(skill.provider)}
-              </span>
-            )}
-            {skill.linked === true && <span className={css.badge}>{tt('list.linked')}</span>}
-            {fileBadge !== undefined && (
-              <span className={css.badge} title={fileBadge.tooltip}>{fileBadge.label}</span>
-            )}
-            {(skill.modelInvocable || skill.userInvocable) && (
-              <span className={`${css.badge} ${css.badgeInvokable}`} title={tt('list.invokableTooltip')}>
-                {tt('list.invokable', { marks: invokableMarks(skill) })}
-              </span>
-            )}
-          </div>
-          <div className={css.cardActions}>
-            <div className={css.moreMenuWrapper} ref={menuRef}>
+          <div className={css.rowControls}>
+            <div className={css.badgeContainer}>
+              {skill.workspaceName !== undefined && (
+                <span className={`${css.badge} ${css.badgeWorkspace}`}>{skill.workspaceName}</span>
+              )}
+              {isIsolated && (
+                <span className={`${css.badge} ${css.badgeIsolated}`} title={tt('workspace.isolatedHint', { workspace: skill.workspaceName ?? '' })}>
+                  {tt('workspace.isolated')}
+                </span>
+              )}
+              {skill.provider !== undefined && (
+                <span className={css.badge} title={tt('provider.tooltip', { provider: providerLabel(skill.provider) })}>
+                  {providerLabel(skill.provider)}
+                </span>
+              )}
+              {skill.linked === true && <span className={css.badge}>{tt('list.linked')}</span>}
+              {fileBadge !== undefined && (
+                <span className={css.badge} title={fileBadge.tooltip}>{fileBadge.label}</span>
+              )}
+              {(skill.modelInvocable || skill.userInvocable) && (
+                <span className={`${css.badge} ${css.badgeInvokable}`} title={tt('list.invokableTooltip')}>
+                  {tt('list.invokable', { marks: invokableMarks(skill) })}
+                </span>
+              )}
+              {skill.updateStatus === 'update_available' && (
+                <span className={`${css.badge} ${css.badgeUpdateAvailable}`} title="有新版本可用">
+                  可更新
+                </span>
+              )}
+              {skill.updateStatus === 'up_to_date' && (
+                <span className={`${css.badge} ${css.badgeUpToDate}`} title="已是最新版本">
+                  最新
+                </span>
+              )}
+              {skill.updateStatus === 'error' && (
+                <span className={`${css.badge} ${css.badgeError}`} title={skill.lastCheckError || '检查更新失败'}>
+                  检查失败
+                </span>
+              )}
+            </div>
+            <div className={css.cardActions}>
+              {skill.updateStatus === 'update_available' && (
+                <button
+                  type="button"
+                  className={css.updateButton}
+                  title="更新此技能至最新版本"
+                  disabled={updating}
+                  onClick={handleUpdateOne}
+                >
+                  {updating ? '更新中' : '更新'}
+                </button>
+              )}
+              <div className={css.moreMenuWrapper} ref={menuRef}>
+                <button
+                  type="button"
+                  className={css.iconActionBtn}
+                  aria-label={tt('list.more')}
+                  title={tt('list.more')}
+                  onClick={(e) => { e.stopPropagation(); setMenuOpen(o => !o) }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="1" />
+                    <circle cx="19" cy="12" r="1" />
+                    <circle cx="5" cy="12" r="1" />
+                  </svg>
+                </button>
+                <div className={`${css.actionDropdown}${menuOpen ? ` ${css.dropdownOpen}` : ''}`}>
+                  <button
+                    type="button"
+                    className={css.menuItem}
+                    disabled={busy}
+                    onClick={(e) => { setMenuOpen(false); void handleCheckOne(e) }}
+                  >
+                    检查更新
+                  </button>
+                  {skill.updateStatus === 'update_available' && (
+                    <button
+                      type="button"
+                      className={css.menuItem}
+                      disabled={updating}
+                      onClick={(e) => { setMenuOpen(false); void handleUpdateOne(e) }}
+                    >
+                      立即更新
+                    </button>
+                  )}
+                  {canCopy && (
+                    <button
+                      type="button"
+                      className={css.menuItem}
+                      disabled={busy}
+                      onClick={() => { setMenuOpen(false); void duplicate() }}
+                    >
+                      {tt('list.duplicate')}
+                    </button>
+                  )}
+                  {skill.path !== undefined && skill.linked !== true && (
+                    <button
+                      type="button"
+                      className={css.menuItem}
+                      disabled={busy}
+                      onClick={() => { setMenuOpen(false); onEdit(skill) }}
+                    >
+                      {tt('list.edit')}
+                    </button>
+                  )}
+                  {skill.path !== undefined && (
+                    <button
+                      type="button"
+                      className={css.menuItem}
+                      disabled={busy}
+                      onClick={() => { setMenuOpen(false); void copyPath() }}
+                    >
+                      {tt('list.copyPath')}
+                    </button>
+                  )}
+                  {skill.path !== undefined && skill.linked !== true && (
+                    <button
+                      type="button"
+                      className={`${css.menuItem} ${css.deleteItem}`}
+                      data-danger=""
+                      disabled={busy}
+                      onClick={() => { setMenuOpen(false); void remove() }}
+                    >
+                      {tt('list.delete')}
+                    </button>
+                  )}
+                </div>
+              </div>
               <button
                 type="button"
-                className={css.iconActionBtn}
-                aria-label={tt('list.more')}
-                title={tt('list.more')}
-                onClick={(e) => { e.stopPropagation(); setMenuOpen(o => !o) }}
+                className={`${css.iconActionBtn}${isPinned ? ` ${css.pinned}` : ''}`}
+                aria-label={isPinned ? tt('list.unpin') : tt('list.pin')}
+                title={isPinned ? tt('list.unpin') : tt('list.pin')}
+                onClick={(e) => { e.stopPropagation(); onTogglePin?.(skill.name) }}
               >
-                ···
+                <svg width="12" height="12" viewBox="0 0 24 24" fill={isPinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <line x1="12" y1="17" x2="12" y2="22"></line>
+                  <path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"></path>
+                </svg>
               </button>
-              <div className={`${css.actionDropdown}${menuOpen ? ` ${css.dropdownOpen}` : ''}`}>
-                {canCopy && (
-                  <button
-                    type="button"
-                    className={css.menuItem}
-                    disabled={busy}
-                    onClick={() => { setMenuOpen(false); void duplicate() }}
-                  >
-                    {tt('list.duplicate')}
-                  </button>
-                )}
-                {skill.path !== undefined && skill.linked !== true && (
-                  <button
-                    type="button"
-                    className={css.menuItem}
-                    disabled={busy}
-                    onClick={() => { setMenuOpen(false); onEdit(skill) }}
-                  >
-                    {tt('list.edit')}
-                  </button>
-                )}
-                {skill.path !== undefined && skill.linked !== true && (
-                  <button
-                    type="button"
-                    className={`${css.menuItem} ${css.deleteItem}`}
-                    data-danger=""
-                    disabled={busy}
-                    onClick={() => { setMenuOpen(false); void remove() }}
-                  >
-                    {tt('list.delete')}
-                  </button>
-                )}
-              </div>
             </div>
-            <button
-              type="button"
-              className={`${css.iconActionBtn}${isPinned ? ` ${css.pinned}` : ''}`}
-              aria-label={isPinned ? tt('list.unpin') : tt('list.pin')}
-              title={isPinned ? tt('list.unpin') : tt('list.pin')}
-              onClick={(e) => { e.stopPropagation(); onTogglePin?.(skill.name) }}
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill={isPinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <line x1="12" y1="17" x2="12" y2="22"></line>
-                <path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"></path>
-              </svg>
-            </button>
+            {canToggle(skill) && (
+              <button
+                type="button"
+                className={css.switch}
+                role="switch"
+                aria-checked={skill.modelInvocable}
+                aria-label={skill.modelInvocable ? tt('list.enabled') : tt('list.disabled')}
+                title={skill.modelInvocable ? tt('list.enabled') : tt('list.disabled')}
+                disabled={busy}
+                onClick={() => { void toggle() }}
+              >
+                <span className={css.switchTrack}><span className={css.switchThumb} /></span>
+              </button>
+            )}
           </div>
-          {canToggle(skill) && (
-            <button
-              type="button"
-              className={css.switch}
-              role="switch"
-              aria-checked={skill.modelInvocable}
-              aria-label={skill.modelInvocable ? tt('list.enabled') : tt('list.disabled')}
-              title={skill.modelInvocable ? tt('list.enabled') : tt('list.disabled')}
-              disabled={busy}
-              onClick={() => { void toggle() }}
-            >
-              <span className={css.switchTrack}><span className={css.switchThumb} /></span>
-            </button>
-          )}
         </div>
         <p className={css.skillDesc} title={skill.description}>{skill.description}</p>
         <div className={css.srOnly}>
@@ -428,17 +473,20 @@ function SkillRow({ skill, api, onChanged, onEdit, onDuplicate, isPinned, onTogg
           {skill.path === undefined && <p className={css.skillWhen}>{localFileHint(skill)}</p>}
         </div>
         {error !== undefined && <p className={css.banner} data-kind="error">{error}</p>}
+        {notice !== undefined && <p className={css.banner} data-kind="ok">{notice}</p>}
       </div>
     </article>
   )
 }
 
 /** The skills tab body. */
-export function SkillsTab({ api, onEdit, onImport, onDuplicate }: {
+export function SkillsTab({ api, onEdit, onImport, onDuplicate, onSelectTab }: {
   api: SkillApi
   onEdit: (skill: SkillEntry) => void
   onImport: () => void
   onDuplicate: (draft: SkillDraft) => void
+  /** Switch the panel to another tab (the command palette's navigation rows). */
+  onSelectTab: (tab: 'market' | 'create' | 'import' | 'backup') => void
 }): React.JSX.Element {
   const [payload, setPayload] = useState<ListPayload | undefined>(undefined)
   const [selectedWorkspace, setSelectedWorkspace] = useState<string>('all')
@@ -452,12 +500,19 @@ export function SkillsTab({ api, onEdit, onImport, onDuplicate }: {
   const [loading, setLoading] = useState(true)
   const [pinnedSkills, setPinnedSkills] = useState<Set<string>>(() => new Set())
   const [detailSkill, setDetailSkill] = useState<SkillEntry | null>(null)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [presetState, setPresetState] = useState<PresetListPayload | undefined>(undefined)
   const [selectedPresetId, setSelectedPresetId] = useState<string>('')
+  const [presetRoots, setPresetRoots] = useState<SkillRootKey[]>([])
+  const [presetBusy, setPresetBusy] = useState(false)
   const [batchMode, setBatchMode] = useState(false)
   const [batchMenuOpen, setBatchMenuOpen] = useState(false)
   const batchMenuRef = useRef<HTMLDivElement>(null)
   const [selectedSkills, setSelectedSkills] = useState<Set<string>>(() => new Set())
   const [batchBusy, setBatchBusy] = useState(false)
+  const [checkingAll, setCheckingAll] = useState(false)
+  const [updatingAll, setUpdatingAll] = useState(false)
+  const [statusNotice, setStatusNotice] = useState<{ kind: 'info' | 'success' | 'error'; text: string } | null>(null)
   // Sequence guard: a slow earlier load must not overwrite a newer one.
   const loadSeq = useRef(0)
 
@@ -490,6 +545,7 @@ export function SkillsTab({ api, onEdit, onImport, onDuplicate }: {
   }
 
   useEffect(() => { void load() }, [api])
+  useEffect(() => { void loadPresets() }, [api])
 
   // One write per change: the whole document is tiny, and rewriting it keeps
   // the stored shape identical to the in-memory shape (no merge step to drift).
@@ -553,6 +609,52 @@ export function SkillsTab({ api, onEdit, onImport, onDuplicate }: {
     }
   }
 
+  const handleCheckAll = async (): Promise<void> => {
+    if (checkingAll) return
+    setCheckingAll(true)
+    setStatusNotice({ kind: 'info', text: '正在检查全部技能的远端更新状态...' })
+    try {
+      const res = await api.checkAll()
+      const summary = res.summary
+      await load()
+      const avail = summary?.updateAvailable ?? 0
+      const errors = summary?.errors ?? 0
+      setStatusNotice({
+        kind: avail > 0 ? 'info' : 'success',
+        text: `检查完成：共 ${summary?.total ?? 0} 个技能，${avail} 个有新版本${errors > 0 ? `，${errors} 个检查出错` : ''}。`,
+      })
+    } catch (err: unknown) {
+      setStatusNotice({
+        kind: 'error',
+        text: `检查更新失败: ${err instanceof Error ? err.message : String(err)}`,
+      })
+    } finally {
+      setCheckingAll(false)
+    }
+  }
+
+  const handleUpdateAll = async (): Promise<void> => {
+    if (updatingAll) return
+    setUpdatingAll(true)
+    setStatusNotice({ kind: 'info', text: '正在拉取最新版本并批量更新技能...' })
+    try {
+      const res = await api.updateAll()
+      const summary = res.summary
+      await load()
+      setStatusNotice({
+        kind: 'success',
+        text: `全部更新完成：成功更新 ${summary?.updated ?? 0} 个技能${summary?.failed > 0 ? `，${summary?.failed} 个失败` : ''}。`,
+      })
+    } catch (err: unknown) {
+      setStatusNotice({
+        kind: 'error',
+        text: `批量更新失败: ${err instanceof Error ? err.message : String(err)}`,
+      })
+    } finally {
+      setUpdatingAll(false)
+    }
+  }
+
   const handleBatchToggle = async (enabled: boolean): Promise<void> => {
     if (batchBusy || selectedSkills.size === 0 || payload === undefined) return
     setBatchBusy(true)
@@ -579,58 +681,126 @@ export function SkillsTab({ api, onEdit, onImport, onDuplicate }: {
     if (!window.confirm(tt('list.batchDeleteConfirm', { count: String(deletableSkills.length) }))) return
     setBatchBusy(true)
     setError(undefined)
+    // One refused skill must not abandon the rest of the selection: keep going
+    // and report every failure instead of the first one only.
+    const failures: string[] = []
     try {
       for (const s of deletableSkills) {
-        if (s.path !== undefined) {
+        if (s.path === undefined) continue
+        try {
           await api.remove(s.name, s.path)
+        } catch (err) {
+          failures.push(`${s.name}: ${err instanceof Error ? err.message : String(err)}`)
         }
       }
       setSelectedSkills(new Set())
-    } catch (err) {
-      setError(tt('list.deleteFailed', { error: err instanceof Error ? err.message : String(err) }))
+      setStatusNotice(failures.length === 0
+        ? { kind: 'success', text: tt('list.batchDeleteDone', { count: String(deletableSkills.length) }) }
+        : { kind: 'error', text: tt('list.batchDeletePartial', { count: String(deletableSkills.length - failures.length), failed: failures.join('; ') }) })
     } finally {
       try { await load() } catch {}
       setBatchBusy(false)
     }
   }
 
-  const handleSavePreset = (): void => {
+  // Ctrl/Cmd+K opens the palette: the shortcut exists exactly for when the user
+  // does not know where the thing they want lives.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        setPaletteOpen(true)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => { window.removeEventListener('keydown', onKeyDown) }
+  }, [])
+
+  /** Reload the stored presets and the deployment records behind the bar. */
+  const loadPresets = async (): Promise<void> => {
+    try {
+      const next = await api.listPresets()
+      setPresetState(next)
+      // Default the activation targets to whatever is already deployed, so
+      // re-activating keeps writing where the user last chose.
+      setPresetRoots(current => current.length > 0
+        ? current
+        : [...new Set(next.deployments.map((entry) => entry.root_key))])
+    } catch {
+      // A store that cannot be read leaves the bar absent rather than breaking
+      // the skill list, which is the panel's main job.
+    }
+  }
+
+  const handleSavePreset = async (): Promise<void> => {
     if (payload === undefined) return
     const name = window.prompt(tt('preset.namePrompt'))
     if (!name || !name.trim()) return
+    // A new preset starts from what the model can see right now, which is the
+    // only membership definition the panel can observe.
     const enabledSkills = payload.groups
       .flatMap(g => g.skills)
       .filter(s => s.modelInvocable)
       .map(s => s.name)
-    setPrefs(cur => savePreset(cur, name.trim(), enabledSkills))
-  }
-
-  const handleDeletePreset = (presetId: string): void => {
-    setPrefs(cur => deletePreset(cur, presetId))
-    if (selectedPresetId === presetId) {
-      setSelectedPresetId('')
+    setPresetBusy(true)
+    try {
+      await api.savePreset({ name: name.trim(), skillNames: enabledSkills })
+      await loadPresets()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setPresetBusy(false)
     }
   }
 
-  const handleApplyPreset = async (preset: SkillPreset): Promise<void> => {
-    if (batchBusy || payload === undefined) return
-    setBatchBusy(true)
+  const handleDeletePreset = async (presetId: string): Promise<void> => {
+    setPresetBusy(true)
+    try {
+      await api.deletePreset(presetId)
+      if (selectedPresetId === presetId) setSelectedPresetId('')
+      await loadPresets()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setPresetBusy(false)
+    }
+  }
+
+  /**
+   * Activate a preset: the host deploys its members into the selected roots and
+   * takes back the skills it does not own, then we refresh both views.
+   */
+  const handleActivatePreset = async (preset: SkillPresetRecord): Promise<void> => {
+    if (presetBusy) return
+    setPresetBusy(true)
     setError(undefined)
     try {
-      const allSkills = payload.groups.flatMap(g => g.skills).filter(canToggle)
-      const targetEnabled = new Set(preset.enabledSkills)
-      for (const s of allSkills) {
-        const shouldBeEnabled = targetEnabled.has(s.name)
-        if (s.modelInvocable !== shouldBeEnabled) {
-          if (s.path !== undefined) await api.setEnabled(s.name, s.path, shouldBeEnabled)
-          else await api.setProviderEnabled(s.name, s.provider, shouldBeEnabled)
-        }
+      const result = await api.applyPreset({
+        id: preset.id,
+        ...(presetRoots.length > 0 ? { roots: presetRoots } : {}),
+        cwd: payload?.cwd,
+      })
+      // Refusals are per skill, so they are reported together rather than
+      // throwing: the moment one directory is someone else's, the rest of the
+      // activation is still worth completing.
+      const refused = result.deployed.filter((entry) => !entry.deployed && entry.reason !== undefined)
+      if (refused.length > 0) {
+        setStatusNotice({
+          kind: 'info',
+          text: refused.map((entry) => `${entry.skillName}: ${entry.reason}`).join('; '),
+        })
+      } else {
+        setStatusNotice({
+          kind: 'success',
+          text: `${tt('preset.activated')}: ${result.deployed.filter((entry) => entry.deployed).length}`,
+        })
       }
     } catch (err) {
-      setError(tt('list.toggleFailed', { error: err instanceof Error ? err.message : String(err) }))
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       try { await load() } catch {}
-      setBatchBusy(false)
+      await loadPresets()
+      setPresetBusy(false)
     }
   }
 
@@ -682,6 +852,7 @@ export function SkillsTab({ api, onEdit, onImport, onDuplicate }: {
   const allVisibleNames = allVisibleSkills.map(s => s.name)
   const facetsActive = hasActiveFacets(prefs)
   const narrowed = query.trim() !== '' || selectedWorkspace !== 'all' || facetsActive
+  const updateCount = payload.updateAvailableCount ?? payload.groups.flatMap(g => g.skills).filter(s => s.updateStatus === 'update_available').length
   const emptyText = query.trim() !== ''
     ? tt('filter.empty', { query: query.trim() })
     : narrowed ? tt('filter.emptyWorkspace') : tt('list.empty')
@@ -690,13 +861,9 @@ export function SkillsTab({ api, onEdit, onImport, onDuplicate }: {
     <div className={css.fillBody}>
       <div className={css.toolbar} data-dsh-part="filter-bar">
         <div className={css.headerTitleGroup}>
-          <span className={css.backArrow} aria-hidden="true">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="19" y1="12" x2="5" y2="12"></line>
-              <polyline points="12 19 5 12 12 5"></polyline>
-            </svg>
-          </span>
-          <h1 className={css.headerTitle}>{tt('list.installedSkills')} ({totalCount})</h1>
+          <h1 className={css.headerTitle}>
+            {tt('list.installedSkills')} ({narrowed ? `${visibleCount}/${totalCount}` : totalCount})
+          </h1>
         </div>
         <div className={css.headerActions}>
           <div className={css.searchWrapper}>
@@ -730,6 +897,54 @@ export function SkillsTab({ api, onEdit, onImport, onDuplicate }: {
               </option>
             ))}
           </select>
+          <button
+            type="button"
+            className={css.toolbarActionBtn}
+            disabled={checkingAll || loading}
+            onClick={() => { void handleCheckAll() }}
+            title="检查全部技能的远端更新状态"
+          >
+            <svg
+              className={checkingAll ? css.spinning : undefined}
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
+            </svg>
+            <span>{checkingAll ? '检查中...' : '检查全部'}</span>
+          </button>
+          <button
+            type="button"
+            className={`${css.toolbarActionBtn}${updateCount > 0 ? ` ${css.toolbarActionBtnPrimary}` : ''}`}
+            disabled={updatingAll || updateCount === 0 || loading}
+            onClick={() => { void handleUpdateAll() }}
+            title={updateCount > 0 ? `更新全部 ${updateCount} 个有新版本的技能` : '当前暂无可用更新'}
+          >
+            <svg
+              className={updatingAll ? css.spinning : undefined}
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            <span>{updatingAll ? '更新中...' : `全部更新 (${updateCount})`}</span>
+          </button>
           <div className={css.batchMenuWrapper} ref={batchMenuRef}>
             <button
               type="button"
@@ -769,6 +984,94 @@ export function SkillsTab({ api, onEdit, onImport, onDuplicate }: {
           </div>
         </div>
       </div>
+      {/* The preset bar is the deployment control: a chip's mark says whether
+          the model currently sees exactly this set of skills, some of them, or
+          none. It sits outside batch mode because activating a preset is not a
+          batch operation on the selection. */}
+      {presetState !== undefined && presetState.presets.length > 0 && (
+        <div className={css.presetBar} data-dsh-part="preset-bar">
+          <span className={css.presetBarLabel}>{tt('preset.barLabel')}</span>
+          {presetState.presets.map((preset) => {
+            const deployedNames = new Set(
+              presetState.deployments
+                .filter((entry) => entry.preset_id === preset.id)
+                .map((entry) => entry.skill_name),
+            )
+            const active = presetState.activeId === preset.id
+            const installed = preset.skillNames.filter((name) => deployedNames.has(name)).length
+            const total = preset.skillNames.length
+            const mark = active && installed === total ? '\u2713' : installed > 0 ? `${installed}/${total}` : undefined
+            const absent = presetState.deployments
+              .filter((entry) => entry.preset_id === preset.id && !preset.skillNames.includes(entry.skill_name))
+              .length
+            return (
+              <span key={preset.id} className={css.presetChipWrapper}>
+                <button
+                  type="button"
+                  className={`${css.presetChip}${active ? ` ${css.presetChipActive}` : ''}`}
+                  disabled={presetBusy}
+                  aria-pressed={active}
+                  title={preset.skillNames.join(', ')}
+                  onClick={() => { void handleActivatePreset(preset) }}
+                >
+                  {preset.name}
+                  {mark !== undefined && <span className={css.presetChipMark}>{mark}</span>}
+                  {absent > 0 && <span className={css.presetChipStale}>{`-${absent}`}</span>}
+                </button>
+                <button
+                  type="button"
+                  className={css.presetChipDelete}
+                  disabled={presetBusy}
+                  aria-label={tt('preset.delete')}
+                  title={tt('preset.delete')}
+                  onClick={() => {
+                    if (window.confirm(tt('preset.deleteConfirm'))) void handleDeletePreset(preset.id)
+                  }}
+                >
+                  {'\u00d7'}
+                </button>
+              </span>
+            )
+          })}
+          <select
+            className={css.select}
+            disabled={presetBusy}
+            aria-label={tt('preset.rootLabel')}
+            value={presetRoots[0] ?? ''}
+            onChange={(e) => { setPresetRoots(e.target.value === '' ? [] : [e.target.value as SkillRootKey]) }}
+          >
+            <option value="">{tt('preset.rootAll')}</option>
+            {presetState.roots.map((root) => (
+              <option key={root} value={root}>{tt(`preset.root.${root}`)}</option>
+            ))}
+          </select>
+        </div>
+      )}
+      {statusNotice && (
+        <div
+          className={`${css.statusNotice} ${
+            statusNotice.kind === 'success'
+              ? css.statusNoticeSuccess
+              : statusNotice.kind === 'error'
+                ? css.statusNoticeError
+                : css.statusNoticeInfo
+          }`}
+        >
+          <span>{statusNotice.text}</span>
+          <button
+            type="button"
+            className={css.iconActionBtn}
+            onClick={() => setStatusNotice(null)}
+            title="关闭通知"
+            aria-label="关闭通知"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+      )}
       {batchMode && (
         <div className={css.batchBar}>
           <span className={css.batchCount}>已选择 {selectedSkills.size} 项</span>
@@ -784,52 +1087,9 @@ export function SkillsTab({ api, onEdit, onImport, onDuplicate }: {
           <button type="button" className={`${css.batchActionBtn} ${css.deleteItem}`} disabled={batchBusy || selectedSkills.size === 0} onClick={() => { void handleBatchDelete() }}>
             批量删除
           </button>
-          <button type="button" className={css.batchActionBtn} disabled={batchBusy} onClick={handleSavePreset}>
+          <button type="button" className={css.batchActionBtn} disabled={batchBusy || presetBusy} onClick={() => { void handleSavePreset() }}>
             {tt('preset.save')}
           </button>
-          {prefs.presets && prefs.presets.length > 0 && (
-            <>
-              <select
-                className={css.select}
-                disabled={batchBusy}
-                aria-label={tt('preset.selectPlaceholder', { count: String(prefs.presets.length) })}
-                value={selectedPresetId}
-                onChange={(e) => { setSelectedPresetId(e.target.value) }}
-              >
-                <option value="">{tt('preset.selectPlaceholder', { count: String(prefs.presets.length) })}</option>
-                {prefs.presets.map(p => (
-                  <option key={p.id} value={p.id}>{p.name} ({p.enabledSkills.length})</option>
-                ))}
-              </select>
-              {selectedPresetId !== '' && (
-                <>
-                  <button
-                    type="button"
-                    className={css.batchActionBtn}
-                    disabled={batchBusy}
-                    onClick={() => {
-                      const p = prefs.presets?.find(item => item.id === selectedPresetId)
-                      if (p) void handleApplyPreset(p)
-                    }}
-                  >
-                    {tt('preset.apply')}
-                  </button>
-                  <button
-                    type="button"
-                    className={`${css.batchActionBtn} ${css.deleteItem}`}
-                    disabled={batchBusy}
-                    onClick={() => {
-                      if (window.confirm(tt('preset.deleteConfirm'))) {
-                        handleDeletePreset(selectedPresetId)
-                      }
-                    }}
-                  >
-                    {tt('preset.delete')}
-                  </button>
-                </>
-              )}
-            </>
-          )}
           <button type="button" className={`${css.batchActionBtn} ${css.batchExitBtn}`} onClick={() => { setBatchMode(false); setSelectedSkills(new Set()) }}>
             完成
           </button>
@@ -913,12 +1173,27 @@ export function SkillsTab({ api, onEdit, onImport, onDuplicate }: {
             </div>
           </div>
         )}
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => { setPaletteOpen(false) }}
+        skills={payload.groups.flatMap(group => group.skills)}
+        presets={presetState}
+        onSelectSkill={(skill) => { setDetailSkill(skill) }}
+        onActivatePreset={(presetId) => {
+          const preset = presetState?.presets.find(item => item.id === presetId)
+          if (preset !== undefined) void handleActivatePreset(preset)
+        }}
+        onSelectTab={onSelectTab}
+        onCheckAll={() => { void handleCheckAll() }}
+        onUpdateAll={() => { void handleUpdateAll() }}
+      />
       <DetailDrawer
         skill={detailSkill}
         api={api}
         onClose={() => { setDetailSkill(null) }}
         onEdit={onEdit}
         onDuplicate={onDuplicate}
+        onChanged={() => { void load() }}
       />
     </div>
   )

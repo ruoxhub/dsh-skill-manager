@@ -1,7 +1,7 @@
 {
   "name": "@moruoxing/dsh-skill-manager",
   "description": "DSH skill center: browse loaded skills by source (bundled / project / user / custom / runtime), enable or disable, create and delete, in a web GUI panel.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "icon": "icon.svg",
   "type": "module",
   "main": "lib/index.js",

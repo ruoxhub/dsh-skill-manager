@@ -136,7 +136,7 @@ describe('SkillPanel shell', () => {
     // Then the panel root and its tab bar carry the family vocabulary
     expect(panel).toBeInstanceOf(HTMLDivElement)
     const tabs = Array.from(mount_.container.querySelectorAll('[data-dsh-part="tab"]'))
-    expect(tabs.map(tab => tab.textContent)).toEqual(['技能', '市场', '创建', '导入'])
+    expect(tabs.map(tab => tab.textContent)).toEqual(['技能', '市场', '创建', '导入', '备份'])
     expect(tabs[0]?.hasAttribute('data-active')).toBe(true)
     expect(tabs[1]?.hasAttribute('data-active')).toBe(false)
     mount_.dispose()
